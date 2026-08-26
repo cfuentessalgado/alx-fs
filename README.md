@@ -30,6 +30,9 @@ EOF
 
 alx task read ARE-1175
 alx task read 019...
+alx task update ARE-1175 <<'EOF'
+Revised canonical task statement.
+EOF
 alx task list
 alx task list --json
 alx task archive ARE-1175
@@ -40,7 +43,7 @@ alx task search meilisearch --json
 alx task context ARE-1175
 ```
 
-`task create` prints only the new UUID. Task IDs must not conflict with any existing task UUID. `task read` prints only the stored body. UUID inputs accept equivalent UUID text forms, such as uppercase UUIDs. Archive has no stdout and removes the task from the default list and search results. Use `task list --archived` to list archived tasks. Delete permanently removes the task, its artifacts, and its annotations. It requires `--confirm` and has no stdout. Plain `task list` and `task search` print one tab-separated record per line with these columns:
+`task create` prints only the new UUID. Task IDs must not conflict with any existing task UUID. `task read` prints only the stored body. UUID inputs accept equivalent UUID text forms, such as uppercase UUIDs. `task update` replaces the stored body from stdin and refreshes `updated_at`. It has no stdout on success and keeps the task UUID and id. Archive has no stdout and removes the task from the default list and search results. Use `task list --archived` to list archived tasks. Delete permanently removes the task, its artifacts, and its annotations. It requires `--confirm` and has no stdout. Plain `task list` and `task search` print one tab-separated record per line with these columns:
 
 ```text
 uuid<TAB>id<TAB>updated_at
@@ -111,9 +114,9 @@ alx serve --tailscale
 
 The default is `127.0.0.1:3000`. `--bind` accepts an explicit `IP:PORT`. Port `0` asks the operating system to select a free port; the listening message shows the selected port. `--tailscale` runs `tailscale ip -4` and binds the first valid IPv4 address on port 3000. The options conflict.
 
-Remote binding has no user authentication in v1. Anyone who can reach the selected IP and port can create and read stored content, manage annotations, archive tasks, and permanently delete tasks. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
+Remote binding has no user authentication in v1. Anyone who can reach the selected IP and port can create and read stored content, update task bodies, manage annotations, archive tasks, and permanently delete tasks. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
 
-The embedded UI browses active and archived tasks and artifacts in type folders. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Creation forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, creates annotations from selected rendered text, resolves annotations, and shows unresolved feedback. Mermaid fenced code blocks are rendered with Mermaid 11 loaded from jsDelivr; if the CDN is unavailable, the diagram source stays visible. Rendered Markdown cannot load images. Updating existing task and artifact content in the browser is not part of v1.
+The embedded UI browses active and archived tasks and artifacts in type folders. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, creates annotations from selected rendered text, resolves annotations, and shows unresolved feedback. Mermaid fenced code blocks are rendered with Mermaid 11 loaded from jsDelivr; if the CDN is unavailable, the diagram source stays visible. Rendered Markdown cannot load images. Editing task bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
 
 ## Pipeline behavior
 

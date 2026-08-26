@@ -23,6 +23,14 @@ printf '%s\n' 'Task instructions' | alx task create TASK_ID
 
 Task creation prints the task UUID. Use `alx task read`, `alx task list`, or `alx task search QUERY` for narrower queries. Add `--json` to list and search commands when structured output is useful.
 
+Update a task body only when the task instructions change:
+
+```bash
+alx task update TASK_ID_OR_UUID < REVISED_FILE
+```
+
+Update has no stdout on success. The task UUID and id stay the same.
+
 Archive a completed task only when requested:
 
 ```bash

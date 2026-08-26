@@ -214,9 +214,14 @@ fn names_allow_duplicates_and_do_not_change_identity_type_or_references() {
 }
 
 #[test]
-fn updates_artifacts_and_reports_missing_records() {
+fn updates_tasks_and_artifacts_and_reports_missing_records() {
     let (_directory, app) = test_app();
-    app.create_task("T-1", "body").unwrap();
+    let task = app.create_task("T-1", "body").unwrap();
+    app.update_task("T-1", "revised").unwrap();
+    let updated = app.read_task(&task.uuid).unwrap();
+    assert_eq!(updated.body, "revised");
+    assert_eq!(updated.id, task.id);
+    assert!(updated.updated_at >= task.updated_at);
     let artifact = app.create_artifact("T-1", "plan", "old").unwrap();
     app.update_artifact(&artifact.uuid, "new").unwrap();
     assert_eq!(app.read_artifact(&artifact.uuid).unwrap().body, "new");

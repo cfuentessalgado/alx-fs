@@ -211,6 +211,31 @@ fn artifact_names_can_be_set_and_renamed_without_changing_uuid_or_type() {
 }
 
 #[test]
+fn task_update_has_no_stdout_and_replaces_body() {
+    let directory = tempfile::tempdir().unwrap();
+    let task_uuid = create_task(&directory);
+
+    command(&directory)
+        .args(["task", "update", "ARE-1175"])
+        .write_stdin("revised body\n")
+        .assert()
+        .success()
+        .stdout("");
+    command(&directory)
+        .args(["task", "read", &task_uuid])
+        .assert()
+        .success()
+        .stdout("revised body\n");
+
+    command(&directory)
+        .args(["task", "update", "missing"])
+        .write_stdin("body")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("task not found"));
+}
+
+#[test]
 fn artifact_update_has_no_stdout_and_replaces_body() {
     let directory = tempfile::tempdir().unwrap();
     create_task(&directory);

@@ -388,6 +388,18 @@ impl App {
         collect_rows(rows)
     }
 
+    pub fn update_task(&self, key: &str, body: &str) -> Result<()> {
+        let task = self.read_task(key)?;
+        let changed = self.connect()?.execute(
+            "UPDATE tasks SET body = ?2, updated_at = ?3 WHERE uuid = ?1",
+            params![task.uuid, body, now()],
+        )?;
+        if changed == 0 {
+            return Err(not_found(format!("task not found: {key}")));
+        }
+        Ok(())
+    }
+
     pub fn archive_task(&self, key: &str) -> Result<()> {
         let task = self.read_task(key)?;
         if task.archived_at.is_some() {
@@ -745,7 +757,10 @@ pub fn router(app: App) -> Router {
         .route("/", get(index))
         .route("/api/tasks", get(api_tasks).post(api_create_task))
         .route("/api/archived-tasks", get(api_archived_tasks))
-        .route("/api/tasks/{key}", get(api_task).delete(api_delete_task))
+        .route(
+            "/api/tasks/{key}",
+            get(api_task).put(api_update_task).delete(api_delete_task),
+        )
         .route("/api/tasks/{key}/archive", post(api_archive_task))
         .route("/api/tasks/{key}/artifacts", post(api_create_artifact))
         .route("/api/artifacts/{uuid}", get(api_artifact))
@@ -868,6 +883,20 @@ async fn api_task(
 #[derive(Debug, Deserialize)]
 struct DeleteConfirmation {
     confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskUpdateInput {
+    body: String,
+}
+
+async fn api_update_task(
+    State(app): State<App>,
+    AxumPath(key): AxumPath<String>,
+    Json(input): Json<TaskUpdateInput>,
+) -> ApiResult<StatusCode> {
+    app.update_task(&key, &input.body)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn api_archive_task(
