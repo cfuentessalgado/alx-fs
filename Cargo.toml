@@ -1,6 +1,6 @@
 [package]
 name = "alx-fs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A persistent task artifact store"
 repository = "https://github.com/cfuentessalgado/alx-fs"
