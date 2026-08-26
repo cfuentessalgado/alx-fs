@@ -1,0 +1,909 @@
+use std::{
+    collections::BTreeMap,
+    error::Error as StdError,
+    fmt, fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::{Path, PathBuf},
+    process::Command,
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
+
+use anyhow::{Context, Result, anyhow, bail};
+use axum::{
+    Json, Router,
+    extract::{Path as AxumPath, Request, State},
+    http::{StatusCode, Uri, header},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
+    routing::{get, post},
+};
+use chrono::Utc;
+use clap::ValueEnum;
+use directories::BaseDirs;
+use pulldown_cmark::{Options, Parser, html};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+const SCHEMA: &str = include_str!("schema.sql");
+const INDEX_HTML: &str = include_str!("web/index.html");
+
+#[derive(Clone, Debug)]
+pub struct App {
+    database_path: Arc<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Task {
+    pub uuid: String,
+    pub id: String,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Artifact {
+    pub uuid: String,
+    pub task_uuid: String,
+    #[serde(rename = "type")]
+    pub artifact_type: String,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Annotation {
+    pub uuid: String,
+    pub artifact_uuid: String,
+    pub kind: AnnotationKind,
+    pub start_offset: Option<u64>,
+    pub end_offset: Option<u64>,
+    pub selected_text: Option<String>,
+    pub body: Option<String>,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+#[value(rename_all = "lower")]
+pub enum AnnotationKind {
+    Comment,
+    Question,
+    Scratch,
+    Good,
+}
+
+impl AnnotationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Comment => "comment",
+            Self::Question => "question",
+            Self::Scratch => "scratch",
+            Self::Good => "good",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Comment => "Comment",
+            Self::Question => "Question",
+            Self::Scratch => "Scratch",
+            Self::Good => "Good",
+        }
+    }
+}
+
+impl FromStr for AnnotationKind {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "comment" => Ok(Self::Comment),
+            "question" => Ok(Self::Question),
+            "scratch" => Ok(Self::Scratch),
+            "good" => Ok(Self::Good),
+            _ => bail!("unsupported annotation kind: {value}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NewAnnotation {
+    pub kind: AnnotationKind,
+    pub start_offset: Option<u64>,
+    pub end_offset: Option<u64>,
+    pub selected_text: Option<String>,
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskView {
+    task: Task,
+    artifacts: Vec<Artifact>,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactView {
+    artifact: Artifact,
+    rendered_html: String,
+    annotations: Vec<Annotation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainErrorKind {
+    Invalid,
+    NotFound,
+}
+
+#[derive(Debug)]
+struct DomainError {
+    kind: DomainErrorKind,
+    message: String,
+}
+
+impl fmt::Display for DomainError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl StdError for DomainError {}
+
+fn invalid(message: impl Into<String>) -> anyhow::Error {
+    DomainError {
+        kind: DomainErrorKind::Invalid,
+        message: message.into(),
+    }
+    .into()
+}
+
+fn not_found(message: impl Into<String>) -> anyhow::Error {
+    DomainError {
+        kind: DomainErrorKind::NotFound,
+        message: message.into(),
+    }
+    .into()
+}
+
+impl App {
+    pub fn from_env() -> Result<Self> {
+        let path = match std::env::var_os("ALX_DB") {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => default_database_path()?,
+        };
+        Self::new(path)
+    }
+
+    pub fn new(database_path: impl Into<PathBuf>) -> Result<Self> {
+        let database_path = database_path.into();
+        if let Some(parent) = database_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create database directory {}", parent.display())
+            })?;
+        }
+        let app = Self {
+            database_path: Arc::new(database_path),
+        };
+        app.migrate()?;
+        Ok(app)
+    }
+
+    pub fn database_path(&self) -> &Path {
+        self.database_path.as_path()
+    }
+
+    fn connect(&self) -> Result<Connection> {
+        let connection = Connection::open(self.database_path.as_path()).with_context(|| {
+            format!(
+                "failed to open SQLite database {}",
+                self.database_path.display()
+            )
+        })?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(connection)
+    }
+
+    fn migrate(&self) -> Result<()> {
+        let mut connection = self.connect()?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(SCHEMA)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
+            [now()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn create_task(&self, id: &str, body: &str) -> Result<Task> {
+        validate_non_empty("task id", id)?;
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let normalized_id = normalized_uuid(id);
+        if let Some(normalized_id) = normalized_id.as_deref() {
+            let collision = transaction
+                .query_row(
+                    "SELECT 1 FROM tasks WHERE uuid = ?1",
+                    [normalized_id],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            if collision.is_some() {
+                return Err(invalid(format!(
+                    "task id conflicts with an existing task UUID: {id}"
+                )));
+            }
+        }
+
+        let uuid = loop {
+            let candidate = new_uuid();
+            let mut statement = transaction.prepare("SELECT id FROM tasks")?;
+            let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
+            let mut collision = normalized_id.as_deref() == Some(candidate.as_str());
+            for existing_id in ids {
+                if normalized_uuid(&existing_id?).as_deref() == Some(candidate.as_str()) {
+                    collision = true;
+                    break;
+                }
+            }
+            drop(statement);
+            if !collision {
+                break candidate;
+            }
+        };
+        let timestamp = now();
+        let task = Task {
+            uuid,
+            id: id.to_owned(),
+            body: body.to_owned(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+        };
+        transaction
+            .execute(
+                "INSERT INTO tasks(uuid, id, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![task.uuid, task.id, task.body, task.created_at, task.updated_at],
+            )
+            .with_context(|| format!("failed to create task {id}"))?;
+        transaction.commit()?;
+        Ok(task)
+    }
+
+    pub fn read_task(&self, key: &str) -> Result<Task> {
+        validate_non_empty("task identifier", key)?;
+        let connection = self.connect()?;
+        let by_id = connection
+            .query_row(
+                "SELECT uuid, id, body, created_at, updated_at FROM tasks WHERE id = ?1",
+                [key],
+                task_from_row,
+            )
+            .optional()?;
+        let by_uuid = match normalized_uuid(key) {
+            Some(uuid) => connection
+                .query_row(
+                    "SELECT uuid, id, body, created_at, updated_at FROM tasks WHERE uuid = ?1",
+                    [uuid],
+                    task_from_row,
+                )
+                .optional()?,
+            None => None,
+        };
+        match (by_id, by_uuid) {
+            (Some(by_id), Some(by_uuid)) if by_id.uuid != by_uuid.uuid => Err(invalid(format!(
+                "ambiguous task identifier matches an id and a UUID: {key}"
+            ))),
+            (Some(task), _) | (None, Some(task)) => Ok(task),
+            (None, None) => Err(not_found(format!("task not found: {key}"))),
+        }
+    }
+
+    pub fn list_tasks(&self) -> Result<Vec<Task>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT uuid, id, body, created_at, updated_at FROM tasks
+             ORDER BY created_at, uuid",
+        )?;
+        let rows = statement.query_map([], task_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub fn search_tasks(&self, query: &str) -> Result<Vec<Task>> {
+        validate_non_empty("search query", query)?;
+        let pattern = format!("%{query}%");
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT uuid, id, body, created_at, updated_at FROM tasks
+             WHERE id LIKE ?1 OR body LIKE ?1
+             ORDER BY updated_at DESC, uuid",
+        )?;
+        let rows = statement.query_map([pattern], task_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub fn create_artifact(
+        &self,
+        task_key: &str,
+        artifact_type: &str,
+        body: &str,
+    ) -> Result<Artifact> {
+        validate_non_empty("artifact type", artifact_type)?;
+        let task = self.read_task(task_key)?;
+        let timestamp = now();
+        let artifact = Artifact {
+            uuid: new_uuid(),
+            task_uuid: task.uuid,
+            artifact_type: artifact_type.to_owned(),
+            body: body.to_owned(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+        };
+        self.connect()?.execute(
+            "INSERT INTO artifacts(uuid, task_uuid, type, body, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                artifact.uuid,
+                artifact.task_uuid,
+                artifact.artifact_type,
+                artifact.body,
+                artifact.created_at,
+                artifact.updated_at
+            ],
+        )?;
+        Ok(artifact)
+    }
+
+    pub fn read_artifact(&self, uuid: &str) -> Result<Artifact> {
+        let normalized = require_uuid(uuid)?;
+        self.connect()?
+            .query_row(
+                "SELECT uuid, task_uuid, type, body, created_at, updated_at
+                 FROM artifacts WHERE uuid = ?1",
+                [normalized],
+                artifact_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| not_found(format!("artifact not found: {uuid}")))
+    }
+
+    pub fn update_artifact(&self, uuid: &str, body: &str) -> Result<()> {
+        let normalized = require_uuid(uuid)?;
+        let changed = self.connect()?.execute(
+            "UPDATE artifacts SET body = ?2, updated_at = ?3 WHERE uuid = ?1",
+            params![normalized, body, now()],
+        )?;
+        if changed == 0 {
+            return Err(not_found(format!("artifact not found: {uuid}")));
+        }
+        Ok(())
+    }
+
+    pub fn list_artifacts(
+        &self,
+        task_key: &str,
+        artifact_type: Option<&str>,
+    ) -> Result<Vec<Artifact>> {
+        if let Some(value) = artifact_type {
+            validate_non_empty("artifact type", value)?;
+        }
+        let task = self.read_task(task_key)?;
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT uuid, task_uuid, type, body, created_at, updated_at
+             FROM artifacts
+             WHERE task_uuid = ?1 AND (?2 IS NULL OR type = ?2)
+             ORDER BY created_at, uuid",
+        )?;
+        let rows = statement.query_map(params![task.uuid, artifact_type], artifact_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub fn create_annotation(
+        &self,
+        artifact_uuid: &str,
+        input: NewAnnotation,
+    ) -> Result<Annotation> {
+        let artifact = self.read_artifact(artifact_uuid)?;
+        validate_offsets(input.start_offset, input.end_offset)?;
+        let annotation = Annotation {
+            uuid: new_uuid(),
+            artifact_uuid: artifact.uuid,
+            kind: input.kind,
+            start_offset: input.start_offset,
+            end_offset: input.end_offset,
+            selected_text: normalize_optional(input.selected_text),
+            body: normalize_optional(input.body),
+            created_at: now(),
+            resolved_at: None,
+        };
+        self.connect()?.execute(
+            "INSERT INTO annotations(
+                uuid, artifact_uuid, kind, start_offset, end_offset, selected_text, body,
+                created_at, resolved_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+            params![
+                annotation.uuid,
+                annotation.artifact_uuid,
+                annotation.kind.as_str(),
+                annotation.start_offset,
+                annotation.end_offset,
+                annotation.selected_text,
+                annotation.body,
+                annotation.created_at
+            ],
+        )?;
+        Ok(annotation)
+    }
+
+    pub fn list_annotations(
+        &self,
+        artifact_uuid: &str,
+        include_resolved: bool,
+    ) -> Result<Vec<Annotation>> {
+        let artifact = self.read_artifact(artifact_uuid)?;
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT uuid, artifact_uuid, kind, start_offset, end_offset, selected_text,
+                    body, created_at, resolved_at
+             FROM annotations
+             WHERE artifact_uuid = ?1 AND (?2 OR resolved_at IS NULL)
+             ORDER BY created_at, uuid",
+        )?;
+        let rows = statement.query_map(
+            params![artifact.uuid, include_resolved],
+            annotation_from_row,
+        )?;
+        collect_rows(rows)
+    }
+
+    pub fn resolve_annotation(&self, uuid: &str) -> Result<()> {
+        let normalized = require_uuid(uuid)?;
+        let changed = self.connect()?.execute(
+            "UPDATE annotations SET resolved_at = COALESCE(resolved_at, ?2) WHERE uuid = ?1",
+            params![normalized, now()],
+        )?;
+        if changed == 0 {
+            return Err(not_found(format!("annotation not found: {uuid}")));
+        }
+        Ok(())
+    }
+
+    pub fn feedback_markdown(&self, artifact_uuid: &str) -> Result<String> {
+        let annotations = self.list_annotations(artifact_uuid, false)?;
+        let mut grouped: BTreeMap<AnnotationKind, Vec<Annotation>> = BTreeMap::new();
+        for annotation in annotations {
+            grouped.entry(annotation.kind).or_default().push(annotation);
+        }
+        let mut output = String::from("# Feedback\n");
+        for (kind, entries) in grouped {
+            output.push_str("\n## ");
+            output.push_str(kind.title());
+            output.push('\n');
+            for entry in entries {
+                if let Some(selected_text) = entry.selected_text {
+                    output.push('\n');
+                    for line in selected_text.lines() {
+                        output.push_str("> ");
+                        output.push_str(line);
+                        output.push('\n');
+                    }
+                }
+                if let Some(body) = entry.body {
+                    output.push('\n');
+                    output.push_str(&body);
+                    output.push('\n');
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    pub fn context_markdown(&self, task_key: &str) -> Result<String> {
+        let task = self.read_task(task_key)?;
+        let artifacts = self.list_artifacts(&task.uuid, None)?;
+        let mut output = format!("# Task: {}\n\n{}\n", markdown_inline(&task.id), task.body);
+        if !artifacts.is_empty() {
+            output.push_str("\n## Artifacts\n");
+            for artifact in artifacts {
+                output.push_str(&format!(
+                    "\n### {} ({})\n\n{}\n",
+                    markdown_inline(&artifact.artifact_type),
+                    artifact.uuid,
+                    artifact.body
+                ));
+            }
+        }
+        Ok(output)
+    }
+
+    pub fn migration_versions(&self) -> Result<Vec<i64>> {
+        let connection = self.connect()?;
+        let mut statement =
+            connection.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        collect_rows(rows)
+    }
+}
+
+pub fn default_database_path() -> Result<PathBuf> {
+    let dirs =
+        BaseDirs::new().ok_or_else(|| anyhow!("could not determine the user data directory"))?;
+    Ok(dirs.data_dir().join("alx").join("alx.db"))
+}
+
+pub fn parse_bind_address(bind: Option<&str>, tailscale: bool) -> Result<SocketAddr> {
+    if bind.is_some() && tailscale {
+        bail!("--bind cannot be used with --tailscale");
+    }
+    if tailscale {
+        return tailscale_address();
+    }
+    bind.unwrap_or("127.0.0.1:3000")
+        .parse()
+        .context("invalid bind address; expected IP:PORT")
+}
+
+fn tailscale_address() -> Result<SocketAddr> {
+    tailscale_address_with(Path::new("tailscale"))
+}
+
+fn tailscale_address_with(program: &Path) -> Result<SocketAddr> {
+    let output = Command::new(program)
+        .args(["ip", "-4"])
+        .output()
+        .context("failed to run 'tailscale ip -4'")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("'tailscale ip -4' failed: {}", stderr.trim());
+    }
+    let stdout = String::from_utf8(output.stdout).context("tailscale returned non-UTF-8 output")?;
+    let ip = stdout
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.parse::<Ipv4Addr>().ok())
+        .ok_or_else(|| anyhow!("'tailscale ip -4' returned no valid IPv4 address"))?;
+    Ok(SocketAddr::new(IpAddr::V4(ip), 3000))
+}
+
+pub fn router(app: App) -> Router {
+    Router::new()
+        .route("/", get(index))
+        .route("/api/tasks", get(api_tasks))
+        .route("/api/tasks/{key}", get(api_task))
+        .route("/api/artifacts/{uuid}", get(api_artifact))
+        .route(
+            "/api/artifacts/{uuid}/annotations",
+            post(api_create_annotation),
+        )
+        .route(
+            "/api/annotations/{uuid}/resolve",
+            post(api_resolve_annotation),
+        )
+        .layer(middleware::from_fn(validate_browser_request))
+        .with_state(app)
+}
+
+pub async fn serve(app: App, address: SocketAddr) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("failed to bind {address}"))?;
+    let local_address = listener.local_addr()?;
+    eprintln!("listening on http://{local_address}");
+    axum::serve(listener, router(app)).await?;
+    Ok(())
+}
+
+async fn index() -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; img-src 'none'; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
+        )],
+        Html(INDEX_HTML),
+    )
+}
+
+async fn validate_browser_request(request: Request, next: Next) -> Response {
+    if let Some(host) = request.headers().get(header::HOST) {
+        let Ok(host) = host.to_str() else {
+            return forbidden("invalid Host header");
+        };
+        if !valid_host(host) {
+            return forbidden("Host must be an IP address or localhost");
+        }
+        if let Some(origin) = request.headers().get(header::ORIGIN) {
+            let Ok(origin) = origin.to_str() else {
+                return forbidden("invalid Origin header");
+            };
+            if !same_origin(origin, host) {
+                return forbidden("cross-origin requests are not allowed");
+            }
+        }
+    }
+    next.run(request).await
+}
+
+fn forbidden(message: &'static str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        message,
+    )
+        .into_response()
+}
+
+fn valid_host(authority: &str) -> bool {
+    authority
+        .parse::<axum::http::uri::Authority>()
+        .is_ok_and(|authority| {
+            authority.host().eq_ignore_ascii_case("localhost")
+                || authority.host().parse::<IpAddr>().is_ok()
+        })
+}
+
+fn same_origin(origin: &str, host: &str) -> bool {
+    let Ok(uri) = origin.parse::<Uri>() else {
+        return false;
+    };
+    matches!(uri.scheme_str(), Some("http") | Some("https"))
+        && uri
+            .authority()
+            .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
+}
+
+async fn api_tasks(State(app): State<App>) -> ApiResult<Json<Vec<Task>>> {
+    Ok(Json(app.list_tasks()?))
+}
+
+async fn api_task(
+    State(app): State<App>,
+    AxumPath(key): AxumPath<String>,
+) -> ApiResult<Json<TaskView>> {
+    let task = app.read_task(&key)?;
+    let artifacts = app.list_artifacts(&task.uuid, None)?;
+    Ok(Json(TaskView { task, artifacts }))
+}
+
+async fn api_artifact(
+    State(app): State<App>,
+    AxumPath(uuid): AxumPath<String>,
+) -> ApiResult<Json<ArtifactView>> {
+    let artifact = app.read_artifact(&uuid)?;
+    let annotations = app.list_annotations(&uuid, false)?;
+    let rendered_html = render_markdown(&artifact.body);
+    Ok(Json(ArtifactView {
+        artifact,
+        rendered_html,
+        annotations,
+    }))
+}
+
+async fn api_create_annotation(
+    State(app): State<App>,
+    AxumPath(uuid): AxumPath<String>,
+    Json(input): Json<NewAnnotation>,
+) -> ApiResult<(StatusCode, Json<Annotation>)> {
+    let annotation = app.create_annotation(&uuid, input)?;
+    Ok((StatusCode::CREATED, Json(annotation)))
+}
+
+async fn api_resolve_annotation(
+    State(app): State<App>,
+    AxumPath(uuid): AxumPath<String>,
+    Json(_body): Json<serde_json::Value>,
+) -> ApiResult<StatusCode> {
+    app.resolve_annotation(&uuid)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub fn render_markdown(markdown: &str) -> String {
+    let parser = Parser::new_ext(markdown, Options::all());
+    let mut unsafe_html = String::new();
+    html::push_html(&mut unsafe_html, parser);
+    ammonia::Builder::default()
+        .rm_tags(&["img"])
+        .clean(&unsafe_html)
+        .to_string()
+}
+
+struct ApiError(anyhow::Error);
+type ApiResult<T> = std::result::Result<T, ApiError>;
+
+impl<E> From<E> for ApiError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(error: E) -> Self {
+        Self(error.into())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let domain_error = self
+            .0
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<DomainError>());
+        let (status, message) = match domain_error {
+            Some(error) if error.kind == DomainErrorKind::NotFound => {
+                (StatusCode::NOT_FOUND, error.to_string())
+            }
+            Some(error) => (StatusCode::BAD_REQUEST, error.to_string()),
+            None => {
+                eprintln!("HTTP request failed: {:#}", self.0);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_owned(),
+                )
+            }
+        };
+        (
+            status,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            message,
+        )
+            .into_response()
+    }
+}
+
+fn now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn new_uuid() -> String {
+    Uuid::now_v7().to_string()
+}
+
+fn normalized_uuid(value: &str) -> Option<String> {
+    Uuid::parse_str(value).ok().map(|uuid| uuid.to_string())
+}
+
+fn require_uuid(value: &str) -> Result<String> {
+    normalized_uuid(value).ok_or_else(|| invalid(format!("invalid UUID: {value}")))
+}
+
+fn validate_non_empty(name: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(invalid(format!("{name} must not be empty")));
+    }
+    Ok(())
+}
+
+fn validate_offsets(start: Option<u64>, end: Option<u64>) -> Result<()> {
+    match (start, end) {
+        (None, None) => Ok(()),
+        (Some(start), Some(end)) if end >= start => Ok(()),
+        (Some(_), Some(_)) => Err(invalid("end offset must not be less than start offset")),
+        _ => Err(invalid("start and end offsets must be supplied together")),
+    }
+}
+
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value.filter(|text| !text.is_empty())
+}
+
+fn markdown_inline(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\n' | '\r' => output.push(' '),
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' => {
+                output.push('\\');
+                output.push(character);
+            }
+            _ => output.push(character),
+        }
+    }
+    output
+}
+
+fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+    Ok(Task {
+        uuid: row.get(0)?,
+        id: row.get(1)?,
+        body: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
+fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
+    Ok(Artifact {
+        uuid: row.get(0)?,
+        task_uuid: row.get(1)?,
+        artifact_type: row.get(2)?,
+        body: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn annotation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Annotation> {
+    let kind: String = row.get(2)?;
+    let kind = <AnnotationKind as FromStr>::from_str(&kind).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )),
+        )
+    })?;
+    Ok(Annotation {
+        uuid: row.get(0)?,
+        artifact_uuid: row.get(1)?,
+        kind,
+        start_offset: row.get(3)?,
+        end_offset: row.get(4)?,
+        selected_text: row.get(5)?,
+        body: row.get(6)?,
+        created_at: row.get(7)?,
+        resolved_at: row.get(8)?,
+    })
+}
+
+fn collect_rows<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+) -> Result<Vec<T>> {
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn fake_command(script: &str) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tailscale");
+        fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        (directory, path)
+    }
+
+    #[test]
+    fn tailscale_selects_first_ipv4_and_passes_expected_arguments() {
+        let (_directory, command) = fake_command(
+            "test \"$1 $2\" = \"ip -4\" || exit 9\nprintf 'not-an-ip\\n100.64.0.8\\n100.64.0.9\\n'",
+        );
+        assert_eq!(
+            tailscale_address_with(&command).unwrap(),
+            "100.64.0.8:3000".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn tailscale_reports_command_and_output_failures() {
+        let (_directory, command) = fake_command("echo unavailable >&2\nexit 3");
+        assert!(
+            tailscale_address_with(&command)
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+
+        let (_directory, command) = fake_command("printf 'not-an-ip\\n'");
+        assert!(
+            tailscale_address_with(&command)
+                .unwrap_err()
+                .to_string()
+                .contains("no valid IPv4")
+        );
+    }
+}

@@ -1,0 +1,282 @@
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+
+use alx::{App, router};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+async fn raw_http(address: SocketAddr, request: String) -> String {
+    tokio::task::spawn_blocking(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    })
+    .await
+    .unwrap()
+}
+
+fn response_body(response: &str) -> &str {
+    response.split_once("\r\n\r\n").unwrap().1
+}
+
+#[tokio::test]
+async fn network_user_journey_loads_ui_and_manages_feedback() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    let task = app.create_task("WEB-E2E", "Body").unwrap();
+    let artifact = app.create_artifact(&task.uuid, "notes", "A😀B").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(app.clone())).await.unwrap();
+    });
+
+    let root = raw_http(
+        address,
+        format!("GET / HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert!(root.starts_with("HTTP/1.1 200"), "{root:?}");
+    assert!(response_body(&root).contains("function selectionOffsets"));
+    assert!(root.contains("content-security-policy:"));
+
+    let task_response = raw_http(
+        address,
+        format!(
+            "GET /api/tasks/{} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n",
+            task.uuid
+        ),
+    )
+    .await;
+    assert!(task_response.starts_with("HTTP/1.1 200"));
+    let task_view: Value = serde_json::from_str(response_body(&task_response)).unwrap();
+    assert_eq!(task_view["artifacts"][0]["uuid"], artifact.uuid);
+
+    // Browser strings use UTF-16 units. Selecting the emoji in A😀B spans offsets 1..3.
+    let body = json!({
+        "kind": "good",
+        "start_offset": 1,
+        "end_offset": 3,
+        "selected_text": "😀",
+        "body": "Keep"
+    })
+    .to_string();
+    let create_response = raw_http(
+        address,
+        format!(
+            "POST /api/artifacts/{}/annotations HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            artifact.uuid,
+            body.len()
+        ),
+    )
+    .await;
+    assert!(create_response.starts_with("HTTP/1.1 201"));
+    let annotation: Value = serde_json::from_str(response_body(&create_response)).unwrap();
+    let annotation_uuid = annotation["uuid"].as_str().unwrap();
+
+    let resolve_response = raw_http(
+        address,
+        format!(
+            "POST /api/annotations/{annotation_uuid}/resolve HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        ),
+    )
+    .await;
+    assert!(resolve_response.starts_with("HTTP/1.1 204"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn http_routes_share_storage_and_sanitize_markdown() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    let task = app.create_task("WEB-1", "Body").unwrap();
+    let artifact = app
+        .create_artifact(
+            &task.uuid,
+            "design",
+            "# Safe\n<script>alert(1)</script>\n[bad](javascript:alert(1))\n![tracker](https://example.invalid/pixel)",
+        )
+        .unwrap();
+    let service = router(app.clone());
+
+    let response = service
+        .clone()
+        .oneshot(Request::get("/api/tasks").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let tasks: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(tasks[0]["id"], "WEB-1");
+
+    let response = service
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/artifacts/{}", artifact.uuid))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let view: Value = serde_json::from_slice(&body).unwrap();
+    let html = view["rendered_html"].as_str().unwrap();
+    assert!(html.contains("<h1>Safe</h1>"));
+    assert!(!html.contains("<script"));
+    assert!(!html.contains("javascript:"));
+    assert!(!html.contains("<img"));
+    assert!(!html.contains("example.invalid"));
+
+    let response = service
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/artifacts/{}/annotations", artifact.uuid))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "kind": "comment",
+                        "start_offset": 0,
+                        "end_offset": 4,
+                        "selected_text": "Safe",
+                        "body": "Useful"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let annotation: Value = serde_json::from_slice(&body).unwrap();
+    let annotation_uuid = annotation["uuid"].as_str().unwrap();
+
+    let response = service
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/annotations/{annotation_uuid}/resolve"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        app.list_annotations(&artifact.uuid, false)
+            .unwrap()
+            .is_empty()
+    );
+
+    let response = service
+        .oneshot(
+            Request::get("/api/artifacts/not-a-uuid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn http_distinguishes_domain_errors_from_storage_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    let service = router(app.clone());
+
+    let missing = service
+        .clone()
+        .oneshot(
+            Request::get("/api/tasks/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let connection = rusqlite::Connection::open(app.database_path()).unwrap();
+    connection.execute("DROP TABLE tasks", []).unwrap();
+    let failure = service
+        .oneshot(Request::get("/api/tasks").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(failure.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(failure.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"internal server error");
+}
+
+#[tokio::test]
+async fn http_rejects_rebinding_hosts_and_cross_origin_mutations() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    let task = app.create_task("WEB-2", "Body").unwrap();
+    let artifact = app.create_artifact(&task.uuid, "notes", "Text").unwrap();
+    let annotation = app
+        .create_annotation(
+            &artifact.uuid,
+            alx::NewAnnotation {
+                kind: alx::AnnotationKind::Comment,
+                start_offset: None,
+                end_offset: None,
+                selected_text: None,
+                body: None,
+            },
+        )
+        .unwrap();
+    let service = router(app);
+    let request_body = json!({
+        "kind": "comment",
+        "start_offset": 0,
+        "end_offset": 4,
+        "selected_text": "Text",
+        "body": null
+    })
+    .to_string();
+
+    let rebinding = service
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/artifacts/{}/annotations", artifact.uuid))
+                .header("host", "attacker.example:3000")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rebinding.status(), StatusCode::FORBIDDEN);
+
+    let cross_origin = service
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/artifacts/{}/annotations", artifact.uuid))
+                .header("host", "127.0.0.1:3000")
+                .header("origin", "http://attacker.example")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cross_origin.status(), StatusCode::FORBIDDEN);
+
+    let form_post = service
+        .oneshot(
+            Request::post(format!("/api/annotations/{}/resolve", annotation.uuid))
+                .header("host", "127.0.0.1:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(form_post.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}

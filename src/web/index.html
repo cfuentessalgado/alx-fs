@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>alx</title>
+<style>
+:root{color-scheme:light dark;font:16px system-ui,sans-serif}*{box-sizing:border-box}body{margin:0;display:grid;grid-template-columns:18rem 1fr;min-height:100vh}aside{border-right:1px solid #8886;padding:1rem}main{padding:2rem;max-width:60rem}.muted{opacity:.7}button{font:inherit;margin:.2rem;padding:.35rem .65rem}.item{display:block;width:100%;text-align:left;margin:.3rem 0}.artifact-list{margin:1rem 0}.feedback{border-top:1px solid #8886;margin-top:2rem;padding-top:1rem}blockquote{border-left:3px solid #8888;margin-left:0;padding-left:1rem}pre{overflow:auto;padding:1rem;background:#8882}code{font-family:ui-monospace,monospace}img{max-width:100%}.actions{position:sticky;top:0;padding:.5rem 0;background:Canvas}.error{color:#c33;white-space:pre-wrap}@media(max-width:700px){body{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid #8886}}
+</style>
+</head>
+<body>
+<aside><h1>alx</h1><div id="tasks">Loading…</div></aside>
+<main><div id="status" class="error"></div><section id="task"><p class="muted">Select a task.</p></section><section id="artifact"></section></main>
+<script>
+const tasksEl=document.querySelector('#tasks'),taskEl=document.querySelector('#task'),artifactEl=document.querySelector('#artifact'),statusEl=document.querySelector('#status');
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,options){const r=await fetch(path,options);if(!r.ok)throw new Error((await r.text())||r.statusText);const type=r.headers.get('content-type')||'';return type.includes('json')?r.json():r.text()}
+function fail(e){statusEl.textContent=e.message||String(e)}
+async function loadTasks(){try{const rows=await api('/api/tasks');tasksEl.innerHTML=rows.length?'':'<p class="muted">No tasks.</p>';for(const t of rows){const b=document.createElement('button');b.className='item';b.textContent=t.id;b.onclick=()=>loadTask(t.uuid);tasksEl.appendChild(b)}}catch(e){fail(e)}}
+async function loadTask(key){try{statusEl.textContent='';const x=await api('/api/tasks/'+encodeURIComponent(key));taskEl.innerHTML='<h2>'+esc(x.task.id)+'</h2><div style="white-space:pre-wrap">'+esc(x.task.body)+'</div><h3>Artifacts</h3>';const list=document.createElement('div');list.className='artifact-list';for(const a of x.artifacts){const b=document.createElement('button');b.textContent=a.type;b.title=a.uuid;b.onclick=()=>loadArtifact(a.uuid);list.appendChild(b)}taskEl.appendChild(list);artifactEl.innerHTML=''}catch(e){fail(e)}}
+function selectionOffsets(root){const s=window.getSelection();if(!s||s.rangeCount!==1||s.isCollapsed)return null;const r=s.getRangeAt(0);if(!root.contains(r.commonAncestorContainer))return null;const before=document.createRange();before.selectNodeContents(root);before.setEnd(r.startContainer,r.startOffset);return{start_offset:before.toString().length,end_offset:before.toString().length+r.toString().length,selected_text:r.toString()}}
+async function addAnnotation(uuid,kind){const root=document.querySelector('#rendered');const selected=selectionOffsets(root);if(!selected){fail(new Error('Select text in the artifact first.'));return}const body=prompt('Optional note:','');if(body===null)return;try{await api('/api/artifacts/'+uuid+'/annotations',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...selected,kind,body:body||null})});await loadArtifact(uuid)}catch(e){fail(e)}}
+async function resolveAnnotation(id,artifactId){try{await api('/api/annotations/'+id+'/resolve',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});await loadArtifact(artifactId)}catch(e){fail(e)}}
+async function loadArtifact(uuid){try{statusEl.textContent='';const x=await api('/api/artifacts/'+uuid);artifactEl.innerHTML='<div class="actions"><strong>'+esc(x.artifact.type)+'</strong> — Select text: </div><article id="rendered">'+x.rendered_html+'</article><section class="feedback"><h3>Feedback</h3></section>';const actions=artifactEl.querySelector('.actions');for(const kind of ['comment','question','scratch','good']){const b=document.createElement('button');b.textContent=kind[0].toUpperCase()+kind.slice(1);b.onclick=()=>addAnnotation(uuid,kind);actions.appendChild(b)}const f=artifactEl.querySelector('.feedback');if(!x.annotations.length)f.insertAdjacentHTML('beforeend','<p class="muted">No unresolved feedback.</p>');for(const a of x.annotations){const d=document.createElement('div');d.innerHTML='<h4>'+esc(a.kind[0].toUpperCase()+a.kind.slice(1))+'</h4>'+(a.selected_text?'<blockquote>'+esc(a.selected_text)+'</blockquote>':'')+(a.body?'<p>'+esc(a.body)+'</p>':'');const b=document.createElement('button');b.textContent='Resolve';b.onclick=()=>resolveAnnotation(a.uuid,uuid);d.appendChild(b);f.appendChild(d)}}catch(e){fail(e)}}
+loadTasks();
+</script>
+</body>
+</html>
