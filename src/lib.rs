@@ -231,7 +231,8 @@ impl App {
     fn migrate(&self) -> Result<()> {
         let mut connection = self.connect()?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(SCHEMA)?;
         transaction.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
