@@ -1,7 +1,7 @@
 use std::io::{self, Read};
 
 use alx::{AnnotationKind, App, NewAnnotation, parse_bind_address};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -16,6 +16,7 @@ enum Command {
     Task(TaskArgs),
     Artifact(ArtifactArgs),
     Annotation(AnnotationArgs),
+    Skill(SkillArgs),
     Serve(ServeArgs),
 }
 
@@ -41,6 +42,16 @@ enum TaskCommand {
     List {
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        archived: bool,
+    },
+    Archive {
+        id_or_uuid: String,
+    },
+    Delete {
+        id_or_uuid: String,
+        #[arg(long, alias = "yes")]
+        confirm: bool,
     },
     Context {
         id_or_uuid: String,
@@ -58,12 +69,18 @@ enum ArtifactCommand {
     Create {
         task_id_or_uuid: String,
         artifact_type: String,
+        #[arg(long)]
+        name: Option<String>,
     },
     Read {
         uuid: String,
     },
     Update {
         uuid: String,
+    },
+    Rename {
+        uuid: String,
+        name: String,
     },
     List {
         task_id_or_uuid: String,
@@ -76,6 +93,9 @@ enum ArtifactCommand {
         uuid: String,
         #[arg(long)]
         json: bool,
+    },
+    Review {
+        uuid: String,
     },
 }
 
@@ -110,6 +130,18 @@ enum AnnotationCommand {
 }
 
 #[derive(Debug, Args)]
+struct SkillArgs {
+    #[command(subcommand)]
+    command: SkillCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillCommand {
+    Read,
+    Install,
+}
+
+#[derive(Debug, Args)]
 struct ServeArgs {
     #[arg(long, value_name = "IP:PORT", conflicts_with = "tailscale")]
     bind: Option<String>,
@@ -120,15 +152,15 @@ struct ServeArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let app = App::from_env()?;
 
     match cli.command {
-        Command::Task(args) => run_task(&app, args.command)?,
-        Command::Artifact(args) => run_artifact(&app, args.command)?,
-        Command::Annotation(args) => run_annotation(&app, args.command)?,
+        Command::Task(args) => run_task(&App::from_env()?, args.command)?,
+        Command::Artifact(args) => run_artifact(&App::from_env()?, args.command)?,
+        Command::Annotation(args) => run_annotation(&App::from_env()?, args.command)?,
+        Command::Skill(args) => run_skill(args.command)?,
         Command::Serve(args) => {
             let address = parse_bind_address(args.bind.as_deref(), args.tailscale)?;
-            alx::serve(app, address).await?;
+            alx::serve(App::from_env()?, address).await?;
         }
     }
     Ok(())
@@ -156,8 +188,12 @@ fn run_task(app: &App, command: TaskCommand) -> Result<()> {
                 }
             }
         }
-        TaskCommand::List { json } => {
-            let tasks = app.list_tasks()?;
+        TaskCommand::List { json, archived } => {
+            let tasks = if archived {
+                app.list_archived_tasks()?
+            } else {
+                app.list_tasks()?
+            };
             if json {
                 println!("{}", serde_json::to_string(&tasks)?);
             } else {
@@ -171,6 +207,16 @@ fn run_task(app: &App, command: TaskCommand) -> Result<()> {
                 }
             }
         }
+        TaskCommand::Archive { id_or_uuid } => app.archive_task(&id_or_uuid)?,
+        TaskCommand::Delete {
+            id_or_uuid,
+            confirm,
+        } => {
+            if !confirm {
+                bail!("task deletion requires --confirm");
+            }
+            app.delete_task(&id_or_uuid)?;
+        }
         TaskCommand::Context { id_or_uuid } => print!("{}", app.context_markdown(&id_or_uuid)?),
     }
     Ok(())
@@ -181,16 +227,23 @@ fn run_artifact(app: &App, command: ArtifactCommand) -> Result<()> {
         ArtifactCommand::Create {
             task_id_or_uuid,
             artifact_type,
+            name,
         } => {
             let body = stdin()?;
             println!(
                 "{}",
-                app.create_artifact(&task_id_or_uuid, &artifact_type, &body)?
-                    .uuid
+                app.create_artifact_with_name(
+                    &task_id_or_uuid,
+                    &artifact_type,
+                    name.as_deref(),
+                    &body,
+                )?
+                .uuid
             );
         }
         ArtifactCommand::Read { uuid } => print!("{}", app.read_artifact(&uuid)?.body),
         ArtifactCommand::Update { uuid } => app.update_artifact(&uuid, &stdin()?)?,
+        ArtifactCommand::Rename { uuid, name } => app.rename_artifact(&uuid, &name)?,
         ArtifactCommand::List {
             task_id_or_uuid,
             artifact_type,
@@ -202,9 +255,10 @@ fn run_artifact(app: &App, command: ArtifactCommand) -> Result<()> {
             } else {
                 for artifact in artifacts {
                     println!(
-                        "{}\t{}\t{}",
+                        "{}\t{}\t{}\t{}",
                         artifact.uuid,
                         tsv_field(&artifact.artifact_type),
+                        tsv_field(&artifact.display_name()),
                         artifact.updated_at
                     );
                 }
@@ -220,6 +274,7 @@ fn run_artifact(app: &App, command: ArtifactCommand) -> Result<()> {
                 print!("{}", app.feedback_markdown(&uuid)?);
             }
         }
+        ArtifactCommand::Review { uuid } => print!("{}", app.review_markdown(&uuid)?),
     }
     Ok(())
 }
@@ -268,6 +323,14 @@ fn run_annotation(app: &App, command: AnnotationCommand) -> Result<()> {
             }
         }
         AnnotationCommand::Resolve { uuid } => app.resolve_annotation(&uuid)?,
+    }
+    Ok(())
+}
+
+fn run_skill(command: SkillCommand) -> Result<()> {
+    match command {
+        SkillCommand::Read => print!("{}", alx::AGENT_SKILL),
+        SkillCommand::Install => println!("{}", alx::install_skill()?.display()),
     }
     Ok(())
 }

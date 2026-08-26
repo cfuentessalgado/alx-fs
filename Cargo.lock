@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "alx"
+name = "alx-fs"
 version = "0.1.0"
 dependencies = [
  "ammonia",

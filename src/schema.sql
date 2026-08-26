@@ -10,13 +10,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     id TEXT NOT NULL UNIQUE,
     body TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    archived_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
     uuid TEXT PRIMARY KEY,
     task_uuid TEXT NOT NULL REFERENCES tasks(uuid) ON DELETE CASCADE,
     type TEXT NOT NULL CHECK(length(type) > 0),
+    name TEXT,
     body TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

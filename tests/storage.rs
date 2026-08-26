@@ -10,13 +10,47 @@ fn test_app() -> (TempDir, App) {
 #[test]
 fn migrates_and_supports_task_crud_and_lookup() {
     let (_directory, app) = test_app();
-    assert_eq!(app.migration_versions().unwrap(), vec![1]);
+    assert_eq!(app.migration_versions().unwrap(), vec![1, 2, 3]);
 
     let task = app.create_task("ARE-1175", "Investigate search").unwrap();
     assert_eq!(app.read_task("ARE-1175").unwrap(), task);
     assert_eq!(app.read_task(&task.uuid).unwrap(), task);
     assert_eq!(app.list_tasks().unwrap(), vec![task.clone()]);
     assert_eq!(app.search_tasks("search").unwrap(), vec![task]);
+}
+
+#[test]
+fn archives_tasks_and_permanently_deletes_their_content() {
+    let (_directory, app) = test_app();
+    let task = app.create_task("ARCHIVE-1", "searchable body").unwrap();
+    let artifact = app
+        .create_artifact(&task.uuid, "notes", "artifact body")
+        .unwrap();
+    app.create_annotation(
+        &artifact.uuid,
+        NewAnnotation {
+            kind: AnnotationKind::Comment,
+            start_offset: None,
+            end_offset: None,
+            selected_text: None,
+            body: Some("feedback".into()),
+        },
+    )
+    .unwrap();
+
+    app.archive_task("ARCHIVE-1").unwrap();
+    app.archive_task(&task.uuid).unwrap();
+    assert!(app.list_tasks().unwrap().is_empty());
+    assert!(app.search_tasks("searchable").unwrap().is_empty());
+    let archived = app.list_archived_tasks().unwrap();
+    assert_eq!(archived.len(), 1);
+    assert!(archived[0].archived_at.is_some());
+    assert_eq!(app.read_task("ARCHIVE-1").unwrap().uuid, task.uuid);
+
+    app.delete_task("ARCHIVE-1").unwrap();
+    assert!(app.list_archived_tasks().unwrap().is_empty());
+    assert!(app.read_task(&task.uuid).is_err());
+    assert!(app.read_artifact(&artifact.uuid).is_err());
 }
 
 #[test]
@@ -67,6 +101,60 @@ fn normalizes_uuid_lookups_and_rejects_cross_namespace_collisions() {
 }
 
 #[test]
+fn migrates_existing_tasks_and_artifacts_with_nullable_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("legacy.db");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+             );
+             INSERT INTO schema_migrations VALUES (1, '2025-01-01T00:00:00Z');
+             CREATE TABLE tasks (
+                uuid TEXT PRIMARY KEY,
+                id TEXT NOT NULL UNIQUE,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE artifacts (
+                uuid TEXT PRIMARY KEY,
+                task_uuid TEXT NOT NULL REFERENCES tasks(uuid) ON DELETE CASCADE,
+                type TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             INSERT INTO tasks VALUES (
+                '01900000-0000-7000-8000-000000000001', 'OLD-1', 'task',
+                '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+             );
+             INSERT INTO artifacts VALUES (
+                '01900000-0000-7000-8000-000000000002',
+                '01900000-0000-7000-8000-000000000001', 'research', 'body',
+                '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+             );",
+        )
+        .unwrap();
+    drop(connection);
+
+    let app = App::new(&database_path).unwrap();
+    assert_eq!(app.migration_versions().unwrap(), vec![1, 2, 3]);
+    assert_eq!(app.read_task("OLD-1").unwrap().archived_at, None);
+    let artifact = app
+        .read_artifact("01900000-0000-7000-8000-000000000002")
+        .unwrap();
+    assert_eq!(artifact.name, None);
+    assert_eq!(
+        serde_json::to_value(&artifact).unwrap()["name"],
+        serde_json::Value::Null
+    );
+    assert_eq!(artifact.display_name(), "research--01900000.md");
+}
+
+#[test]
 fn permits_duplicate_artifact_types_and_keeps_them_in_context() {
     let (_directory, app) = test_app();
     let task = app.create_task("ARE-1", "Task body").unwrap();
@@ -84,6 +172,45 @@ fn permits_duplicate_artifact_types_and_keeps_them_in_context() {
     assert!(context.contains(&format!("### notes ({})", second.uuid)));
     assert!(context.contains("First"));
     assert!(context.contains("Second"));
+}
+
+#[test]
+fn names_allow_duplicates_and_do_not_change_identity_type_or_references() {
+    let (_directory, app) = test_app();
+    app.create_task("T-NAMES", "body").unwrap();
+    let first = app
+        .create_artifact_with_name("T-NAMES", "research", Some("same.md"), "one")
+        .unwrap();
+    let second = app
+        .create_artifact_with_name("T-NAMES", "plan", Some("other.md"), "two")
+        .unwrap();
+    let annotation = app
+        .create_annotation(
+            &first.uuid,
+            NewAnnotation {
+                kind: AnnotationKind::Comment,
+                start_offset: None,
+                end_offset: None,
+                selected_text: None,
+                body: Some("note".into()),
+            },
+        )
+        .unwrap();
+
+    app.rename_artifact(&first.uuid, "renamed.md").unwrap();
+    app.rename_artifact(&second.uuid, "renamed.md").unwrap();
+
+    let renamed = app.read_artifact(&first.uuid).unwrap();
+    assert_eq!(renamed.uuid, first.uuid);
+    assert_eq!(renamed.task_uuid, first.task_uuid);
+    assert_eq!(renamed.artifact_type, "research");
+    assert_eq!(renamed.name.as_deref(), Some("renamed.md"));
+    assert_eq!(renamed.body, "one");
+    assert_eq!(app.read_artifact(&second.uuid).unwrap().name, renamed.name);
+    assert_eq!(
+        app.list_annotations(&first.uuid, false).unwrap()[0].uuid,
+        annotation.uuid
+    );
 }
 
 #[test]
@@ -136,6 +263,16 @@ fn feedback_is_grouped_and_resolved_annotations_are_filtered() {
     assert!(feedback.contains("> line one\n> line two"));
     assert!(feedback.contains("Are we sure?"));
     assert!(feedback.contains("## Good"));
+
+    let review = app.review_markdown(&artifact.uuid).unwrap();
+    assert!(review.starts_with(&format!(
+        "# Artifact Review\n\nArtifact UUID: {}\n",
+        artifact.uuid
+    )));
+    assert!(review.contains("\n## Feedback\n"));
+    assert!(review.contains("\n### Question\n"));
+    assert!(review.contains("\n### Good\n"));
+    assert!(!review.contains("\n# Feedback\n"));
 
     app.resolve_annotation(&question.uuid).unwrap();
     let unresolved = app.list_annotations(&artifact.uuid, false).unwrap();

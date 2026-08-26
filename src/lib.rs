@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 const SCHEMA: &str = include_str!("schema.sql");
 const INDEX_HTML: &str = include_str!("web/index.html");
+pub const AGENT_SKILL: &str = include_str!("skill.md");
 
 #[derive(Clone, Debug)]
 pub struct App {
@@ -42,6 +43,7 @@ pub struct Task {
     pub body: String,
     pub created_at: String,
     pub updated_at: String,
+    pub archived_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,9 +52,18 @@ pub struct Artifact {
     pub task_uuid: String,
     #[serde(rename = "type")]
     pub artifact_type: String,
+    pub name: Option<String>,
     pub body: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl Artifact {
+    pub fn display_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| artifact_fallback_name(&self.artifact_type, &self.uuid))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -221,6 +232,34 @@ impl App {
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
             [now()],
         )?;
+        let has_artifact_name: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('artifacts') WHERE name = 'name'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_artifact_name {
+            transaction.execute("ALTER TABLE artifacts ADD COLUMN name TEXT", [])?;
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+            [now()],
+        )?;
+        let has_task_archived_at: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'archived_at'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_task_archived_at {
+            transaction.execute("ALTER TABLE tasks ADD COLUMN archived_at TEXT", [])?;
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
+            [now()],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -229,6 +268,13 @@ impl App {
         validate_non_empty("task id", id)?;
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let duplicate = transaction
+            .query_row("SELECT 1 FROM tasks WHERE id = ?1", [id], |_| Ok(()))
+            .optional()?;
+        if duplicate.is_some() {
+            return Err(invalid(format!("task id already exists: {id}")));
+        }
 
         let normalized_id = normalized_uuid(id);
         if let Some(normalized_id) = normalized_id.as_deref() {
@@ -269,6 +315,7 @@ impl App {
             body: body.to_owned(),
             created_at: timestamp.clone(),
             updated_at: timestamp,
+            archived_at: None,
         };
         transaction
             .execute(
@@ -285,7 +332,7 @@ impl App {
         let connection = self.connect()?;
         let by_id = connection
             .query_row(
-                "SELECT uuid, id, body, created_at, updated_at FROM tasks WHERE id = ?1",
+                "SELECT uuid, id, body, created_at, updated_at, archived_at FROM tasks WHERE id = ?1",
                 [key],
                 task_from_row,
             )
@@ -293,7 +340,7 @@ impl App {
         let by_uuid = match normalized_uuid(key) {
             Some(uuid) => connection
                 .query_row(
-                    "SELECT uuid, id, body, created_at, updated_at FROM tasks WHERE uuid = ?1",
+                    "SELECT uuid, id, body, created_at, updated_at, archived_at FROM tasks WHERE uuid = ?1",
                     [uuid],
                     task_from_row,
                 )
@@ -310,12 +357,21 @@ impl App {
     }
 
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
+        self.list_tasks_by_archive_status(false)
+    }
+
+    pub fn list_archived_tasks(&self) -> Result<Vec<Task>> {
+        self.list_tasks_by_archive_status(true)
+    }
+
+    fn list_tasks_by_archive_status(&self, archived: bool) -> Result<Vec<Task>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT uuid, id, body, created_at, updated_at FROM tasks
+            "SELECT uuid, id, body, created_at, updated_at, archived_at FROM tasks
+             WHERE (?1 AND archived_at IS NOT NULL) OR (NOT ?1 AND archived_at IS NULL)
              ORDER BY created_at, uuid",
         )?;
-        let rows = statement.query_map([], task_from_row)?;
+        let rows = statement.query_map([archived], task_from_row)?;
         collect_rows(rows)
     }
 
@@ -324,12 +380,39 @@ impl App {
         let pattern = format!("%{query}%");
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT uuid, id, body, created_at, updated_at FROM tasks
-             WHERE id LIKE ?1 OR body LIKE ?1
+            "SELECT uuid, id, body, created_at, updated_at, archived_at FROM tasks
+             WHERE archived_at IS NULL AND (id LIKE ?1 OR body LIKE ?1)
              ORDER BY updated_at DESC, uuid",
         )?;
         let rows = statement.query_map([pattern], task_from_row)?;
         collect_rows(rows)
+    }
+
+    pub fn archive_task(&self, key: &str) -> Result<()> {
+        let task = self.read_task(key)?;
+        if task.archived_at.is_some() {
+            return Ok(());
+        }
+        let timestamp = now();
+        let changed = self.connect()?.execute(
+            "UPDATE tasks SET archived_at = ?2, updated_at = ?2 WHERE uuid = ?1",
+            params![task.uuid, timestamp],
+        )?;
+        if changed == 0 {
+            return Err(not_found(format!("task not found: {key}")));
+        }
+        Ok(())
+    }
+
+    pub fn delete_task(&self, key: &str) -> Result<()> {
+        let task = self.read_task(key)?;
+        let changed = self
+            .connect()?
+            .execute("DELETE FROM tasks WHERE uuid = ?1", [task.uuid])?;
+        if changed == 0 {
+            return Err(not_found(format!("task not found: {key}")));
+        }
+        Ok(())
     }
 
     pub fn create_artifact(
@@ -338,24 +421,43 @@ impl App {
         artifact_type: &str,
         body: &str,
     ) -> Result<Artifact> {
+        self.create_artifact_with_name(task_key, artifact_type, None, body)
+    }
+
+    pub fn create_artifact_with_name(
+        &self,
+        task_key: &str,
+        artifact_type: &str,
+        name: Option<&str>,
+        body: &str,
+    ) -> Result<Artifact> {
         validate_non_empty("artifact type", artifact_type)?;
+        if let Some(name) = name {
+            validate_non_empty("artifact name", name)?;
+        }
         let task = self.read_task(task_key)?;
         let timestamp = now();
+        let uuid = new_uuid();
+        let name = name
+            .map(str::to_owned)
+            .or_else(|| Some(artifact_fallback_name(artifact_type, &uuid)));
         let artifact = Artifact {
-            uuid: new_uuid(),
+            uuid,
             task_uuid: task.uuid,
             artifact_type: artifact_type.to_owned(),
+            name,
             body: body.to_owned(),
             created_at: timestamp.clone(),
             updated_at: timestamp,
         };
         self.connect()?.execute(
-            "INSERT INTO artifacts(uuid, task_uuid, type, body, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO artifacts(uuid, task_uuid, type, name, body, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 artifact.uuid,
                 artifact.task_uuid,
                 artifact.artifact_type,
+                artifact.name,
                 artifact.body,
                 artifact.created_at,
                 artifact.updated_at
@@ -368,7 +470,7 @@ impl App {
         let normalized = require_uuid(uuid)?;
         self.connect()?
             .query_row(
-                "SELECT uuid, task_uuid, type, body, created_at, updated_at
+                "SELECT uuid, task_uuid, type, name, body, created_at, updated_at
                  FROM artifacts WHERE uuid = ?1",
                 [normalized],
                 artifact_from_row,
@@ -389,6 +491,19 @@ impl App {
         Ok(())
     }
 
+    pub fn rename_artifact(&self, uuid: &str, name: &str) -> Result<()> {
+        let normalized = require_uuid(uuid)?;
+        validate_non_empty("artifact name", name)?;
+        let changed = self.connect()?.execute(
+            "UPDATE artifacts SET name = ?2, updated_at = ?3 WHERE uuid = ?1",
+            params![normalized, name, now()],
+        )?;
+        if changed == 0 {
+            return Err(not_found(format!("artifact not found: {uuid}")));
+        }
+        Ok(())
+    }
+
     pub fn list_artifacts(
         &self,
         task_key: &str,
@@ -400,7 +515,7 @@ impl App {
         let task = self.read_task(task_key)?;
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT uuid, task_uuid, type, body, created_at, updated_at
+            "SELECT uuid, task_uuid, type, name, body, created_at, updated_at
              FROM artifacts
              WHERE task_uuid = ?1 AND (?2 IS NULL OR type = ?2)
              ORDER BY created_at, uuid",
@@ -480,14 +595,33 @@ impl App {
     }
 
     pub fn feedback_markdown(&self, artifact_uuid: &str) -> Result<String> {
+        self.feedback_markdown_at_level(artifact_uuid, 1)
+    }
+
+    pub fn review_markdown(&self, artifact_uuid: &str) -> Result<String> {
+        let artifact = self.read_artifact(artifact_uuid)?;
+        let feedback = self.feedback_markdown_at_level(&artifact.uuid, 2)?;
+        Ok(format!(
+            "# Artifact Review\n\nArtifact UUID: {}\n\nYou must review and address all unresolved feedback below.\n\nRules:\n- Read the current artifact before making changes.\n- Address every unresolved `comment`, `question`, and `scratch`.\n- Treat `good` annotations as guidance to preserve that part unless conflicting feedback requires otherwise.\n- Do not resolve annotations until their feedback has been addressed.\n- Update the existing artifact instead of creating a replacement unless explicitly requested.\n\n{}",
+            artifact.uuid, feedback
+        ))
+    }
+
+    fn feedback_markdown_at_level(
+        &self,
+        artifact_uuid: &str,
+        heading_level: usize,
+    ) -> Result<String> {
         let annotations = self.list_annotations(artifact_uuid, false)?;
         let mut grouped: BTreeMap<AnnotationKind, Vec<Annotation>> = BTreeMap::new();
         for annotation in annotations {
             grouped.entry(annotation.kind).or_default().push(annotation);
         }
-        let mut output = String::from("# Feedback\n");
+        let mut output = format!("{} Feedback\n", "#".repeat(heading_level));
         for (kind, entries) in grouped {
-            output.push_str("\n## ");
+            output.push('\n');
+            output.push_str(&"#".repeat(heading_level + 1));
+            output.push(' ');
             output.push_str(kind.title());
             output.push('\n');
             for entry in entries {
@@ -512,7 +646,11 @@ impl App {
     pub fn context_markdown(&self, task_key: &str) -> Result<String> {
         let task = self.read_task(task_key)?;
         let artifacts = self.list_artifacts(&task.uuid, None)?;
-        let mut output = format!("# Task: {}\n\n{}\n", markdown_inline(&task.id), task.body);
+        let mut output = format!(
+            "# Task: {}\n\n{}\n\n## Agent instructions\n\nWhen creating an artifact, provide a short descriptive filename with `--name` when there is an obvious one. Use the artifact UUID for all subsequent operations.\n",
+            markdown_inline(&task.id),
+            task.body
+        );
         if !artifacts.is_empty() {
             output.push_str("\n## Artifacts\n");
             for artifact in artifacts {
@@ -540,6 +678,32 @@ pub fn default_database_path() -> Result<PathBuf> {
     let dirs =
         BaseDirs::new().ok_or_else(|| anyhow!("could not determine the user data directory"))?;
     Ok(dirs.data_dir().join("alx").join("alx.db"))
+}
+
+pub fn default_skill_path() -> Result<PathBuf> {
+    let dirs = BaseDirs::new().ok_or_else(|| anyhow!("could not determine the home directory"))?;
+    Ok(dirs
+        .home_dir()
+        .join(".agents")
+        .join("skills")
+        .join("alx")
+        .join("SKILL.md"))
+}
+
+pub fn install_skill() -> Result<PathBuf> {
+    let path = default_skill_path()?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| anyhow!("agent skill path has no parent directory"))?;
+    fs::create_dir_all(directory).with_context(|| {
+        format!(
+            "failed to create agent skill directory {}",
+            directory.display()
+        )
+    })?;
+    fs::write(&path, AGENT_SKILL)
+        .with_context(|| format!("failed to install agent skill at {}", path.display()))?;
+    Ok(path)
 }
 
 pub fn parse_bind_address(bind: Option<&str>, tailscale: bool) -> Result<SocketAddr> {
@@ -579,8 +743,11 @@ fn tailscale_address_with(program: &Path) -> Result<SocketAddr> {
 pub fn router(app: App) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/api/tasks", get(api_tasks))
-        .route("/api/tasks/{key}", get(api_task))
+        .route("/api/tasks", get(api_tasks).post(api_create_task))
+        .route("/api/archived-tasks", get(api_archived_tasks))
+        .route("/api/tasks/{key}", get(api_task).delete(api_delete_task))
+        .route("/api/tasks/{key}/archive", post(api_archive_task))
+        .route("/api/tasks/{key}/artifacts", post(api_create_artifact))
         .route("/api/artifacts/{uuid}", get(api_artifact))
         .route(
             "/api/artifacts/{uuid}/annotations",
@@ -666,6 +833,24 @@ async fn api_tasks(State(app): State<App>) -> ApiResult<Json<Vec<Task>>> {
     Ok(Json(app.list_tasks()?))
 }
 
+#[derive(Debug, Deserialize)]
+struct NewTaskInput {
+    id: String,
+    body: String,
+}
+
+async fn api_create_task(
+    State(app): State<App>,
+    Json(input): Json<NewTaskInput>,
+) -> ApiResult<(StatusCode, Json<Task>)> {
+    let task = app.create_task(&input.id, &input.body)?;
+    Ok((StatusCode::CREATED, Json(task)))
+}
+
+async fn api_archived_tasks(State(app): State<App>) -> ApiResult<Json<Vec<Task>>> {
+    Ok(Json(app.list_archived_tasks()?))
+}
+
 async fn api_task(
     State(app): State<App>,
     AxumPath(key): AxumPath<String>,
@@ -678,6 +863,54 @@ async fn api_task(
         artifacts,
         rendered_task_html,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteConfirmation {
+    confirm: bool,
+}
+
+async fn api_archive_task(
+    State(app): State<App>,
+    AxumPath(key): AxumPath<String>,
+    Json(_body): Json<serde_json::Value>,
+) -> ApiResult<StatusCode> {
+    app.archive_task(&key)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_delete_task(
+    State(app): State<App>,
+    AxumPath(key): AxumPath<String>,
+    Json(input): Json<DeleteConfirmation>,
+) -> ApiResult<StatusCode> {
+    if !input.confirm {
+        return Err(invalid("task deletion requires explicit confirmation").into());
+    }
+    app.delete_task(&key)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct NewArtifactInput {
+    #[serde(rename = "type")]
+    artifact_type: String,
+    name: Option<String>,
+    body: String,
+}
+
+async fn api_create_artifact(
+    State(app): State<App>,
+    AxumPath(key): AxumPath<String>,
+    Json(input): Json<NewArtifactInput>,
+) -> ApiResult<(StatusCode, Json<Artifact>)> {
+    let artifact = app.create_artifact_with_name(
+        &key,
+        &input.artifact_type,
+        input.name.as_deref(),
+        &input.body,
+    )?;
+    Ok((StatusCode::CREATED, Json(artifact)))
 }
 
 async fn api_artifact(
@@ -821,7 +1054,12 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         body: row.get(2)?,
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
+        archived_at: row.get(5)?,
     })
+}
+
+fn artifact_fallback_name(artifact_type: &str, uuid: &str) -> String {
+    format!("{artifact_type}--{}.md", &uuid[..8])
 }
 
 fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
@@ -829,9 +1067,10 @@ fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
         uuid: row.get(0)?,
         task_uuid: row.get(1)?,
         artifact_type: row.get(2)?,
-        body: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        name: row.get(3)?,
+        body: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 

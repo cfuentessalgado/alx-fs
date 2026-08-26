@@ -1,9 +1,16 @@
 [package]
-name = "alx"
+name = "alx-fs"
 version = "0.1.0"
 edition = "2024"
 description = "A persistent task artifact store"
 license = "MIT"
+
+[lib]
+name = "alx"
+
+[[bin]]
+name = "alx"
+path = "src/main.rs"
 
 [dependencies]
 ammonia = "4.1"

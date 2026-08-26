@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use alx::{Annotation, Artifact, Task};
+use alx::{AGENT_SKILL, Annotation, Artifact, Task};
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -82,25 +82,73 @@ fn create_read_list_search_and_context_stdout_contracts() {
     let plain_artifacts =
         stdout(command(&directory).args(["artifact", "list", "ARE-1175", "--type", "research"]));
     let fields: Vec<_> = plain_artifacts.trim_end().split('\t').collect();
-    assert_eq!(fields.len(), 3);
+    assert_eq!(fields.len(), 4);
     assert_eq!(fields[0], artifact_uuid);
     assert_eq!(fields[1], "research");
-    assert!(fields[2].contains('T'));
+    assert_eq!(fields[2], format!("research--{}.md", &artifact_uuid[..8]));
+    assert!(fields[3].contains('T'));
     let artifacts: Vec<Artifact> = serde_json::from_str(&stdout(
         command(&directory).args(["artifact", "list", "ARE-1175", "--json"]),
     ))
     .unwrap();
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].uuid, artifact_uuid);
+    assert_eq!(
+        artifacts[0].name.as_deref(),
+        Some(format!("research--{}.md", &artifact_uuid[..8]).as_str())
+    );
     assert_eq!(artifacts[0].body, "# Findings\n\nOld\n");
 
     let expected_context = format!(
-        "# Task: ARE-1175\n\nTask body\n\n\n## Artifacts\n\n### research ({artifact_uuid})\n\n# Findings\n\nOld\n\n"
+        "# Task: ARE-1175\n\nTask body\n\n\n## Agent instructions\n\nWhen creating an artifact, provide a short descriptive filename with `--name` when there is an obvious one. Use the artifact UUID for all subsequent operations.\n\n## Artifacts\n\n### research ({artifact_uuid})\n\n# Findings\n\nOld\n\n"
     );
     assert_eq!(
         stdout(command(&directory).args(["task", "context", "ARE-1175"])),
         expected_context
     );
+}
+
+#[test]
+fn task_archive_and_confirmation_gated_delete_have_no_stdout() {
+    let directory = tempfile::tempdir().unwrap();
+    let task_uuid = create_task(&directory);
+    create_artifact(&directory);
+
+    command(&directory)
+        .args(["task", "archive", "ARE-1175"])
+        .assert()
+        .success()
+        .stdout("");
+    command(&directory)
+        .args(["task", "list"])
+        .assert()
+        .success()
+        .stdout("");
+    let archived: Vec<Task> = serde_json::from_str(&stdout(command(&directory).args([
+        "task",
+        "list",
+        "--archived",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(archived[0].uuid, task_uuid);
+    assert!(archived[0].archived_at.is_some());
+
+    command(&directory)
+        .args(["task", "delete", "ARE-1175"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires --confirm"));
+    command(&directory)
+        .args(["task", "delete", "ARE-1175", "--confirm"])
+        .assert()
+        .success()
+        .stdout("");
+    command(&directory)
+        .args(["task", "read", "ARE-1175"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("task not found"));
 }
 
 #[test]
@@ -117,6 +165,49 @@ fn plain_task_output_escapes_tsv_control_characters() {
     let fields: Vec<_> = output.trim_end().split('\t').collect();
     assert_eq!(fields.len(), 3);
     assert_eq!(fields[1], "A\\tB\\\\C\\nD\\rE");
+}
+
+#[test]
+fn artifact_names_can_be_set_and_renamed_without_changing_uuid_or_type() {
+    let directory = tempfile::tempdir().unwrap();
+    create_task(&directory);
+    let artifact_uuid = stdout(
+        command(&directory)
+            .args([
+                "artifact",
+                "create",
+                "ARE-1175",
+                "research",
+                "--name",
+                "meilisearch-index-findings.md",
+            ])
+            .write_stdin("findings"),
+    )
+    .trim()
+    .to_owned();
+
+    command(&directory)
+        .args([
+            "artifact",
+            "rename",
+            &artifact_uuid,
+            "pwa-filter-semantics.md",
+        ])
+        .assert()
+        .success()
+        .stdout("");
+
+    let artifacts: Vec<Artifact> = serde_json::from_str(&stdout(
+        command(&directory).args(["artifact", "list", "ARE-1175", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(artifacts[0].uuid, artifact_uuid);
+    assert_eq!(artifacts[0].artifact_type, "research");
+    assert_eq!(
+        artifacts[0].name.as_deref(),
+        Some("pwa-filter-semantics.md")
+    );
+    assert_eq!(artifacts[0].body, "findings");
 }
 
 #[test]
@@ -170,6 +261,12 @@ fn annotation_cli_creates_lists_feedback_and_resolves() {
         stdout(command(&directory).args(["artifact", "feedback", &artifact_uuid])),
         "# Feedback\n\n## Question\n\n> Findings\n\nWhy?\n"
     );
+    assert_eq!(
+        stdout(command(&directory).args(["artifact", "review", &artifact_uuid])),
+        format!(
+            "# Artifact Review\n\nArtifact UUID: {artifact_uuid}\n\nYou must review and address all unresolved feedback below.\n\nRules:\n- Read the current artifact before making changes.\n- Address every unresolved `comment`, `question`, and `scratch`.\n- Treat `good` annotations as guidance to preserve that part unless conflicting feedback requires otherwise.\n- Do not resolve annotations until their feedback has been addressed.\n- Update the existing artifact instead of creating a replacement unless explicitly requested.\n\n## Feedback\n\n### Question\n\n> Findings\n\nWhy?\n"
+        )
+    );
     let feedback: Vec<Annotation> = serde_json::from_str(&stdout(command(&directory).args([
         "artifact",
         "feedback",
@@ -209,6 +306,40 @@ fn annotation_cli_creates_lists_feedback_and_resolves() {
     .unwrap();
     assert_eq!(all.len(), 1);
     assert!(all[0].resolved_at.is_some());
+}
+
+#[test]
+fn skill_read_outputs_embedded_skill_without_creating_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("alx.db");
+    assert!(AGENT_SKILL.contains(
+        "When creating an artifact, provide a short descriptive filename with `--name` when there is an obvious one. Use the artifact UUID for all subsequent operations."
+    ));
+
+    command(&directory)
+        .args(["skill", "read"])
+        .assert()
+        .success()
+        .stdout(AGENT_SKILL);
+
+    assert!(!database.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_install_writes_embedded_skill_to_global_agent_skills_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(".agents/skills/alx/SKILL.md");
+
+    command(&directory)
+        .env("HOME", directory.path())
+        .args(["skill", "install"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", path.display()));
+
+    assert_eq!(std::fs::read_to_string(path).unwrap(), AGENT_SKILL);
+    assert!(!directory.path().join("alx.db").exists());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
