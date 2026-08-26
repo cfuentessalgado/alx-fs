@@ -61,6 +61,12 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(response_body(&root).contains("data-new-artifact"));
     assert!(response_body(&root).contains("function submitTask"));
     assert!(response_body(&root).contains("function submitArtifact"));
+    assert!(response_body(&root).contains("data-copy-menu"));
+    assert!(response_body(&root).contains("function copyText"));
+    assert!(response_body(&root).contains("function taskMetadata"));
+    assert!(response_body(&root).contains("function artifactMetadata"));
+    assert!(response_body(&root).contains("alx task read "));
+    assert!(response_body(&root).contains("alx artifact read "));
     assert!(response_body(&root).contains("data-archive-task"));
     assert!(response_body(&root).contains("data-delete-task"));
     assert!(response_body(&root).contains("window.confirm"));
