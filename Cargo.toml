@@ -3,6 +3,7 @@ name = "alx-fs"
 version = "0.1.0"
 edition = "2024"
 description = "A persistent task artifact store"
+repository = "https://github.com/cfuentessalgado/alx-fs"
 license = "MIT"
 
 [lib]
