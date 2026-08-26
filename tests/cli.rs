@@ -42,6 +42,169 @@ fn create_artifact(directory: &TempDir) -> String {
 }
 
 #[test]
+fn dump_writes_a_file_tree_with_task_and_artifact_files() {
+    let directory = tempfile::tempdir().unwrap();
+    create_task(&directory);
+    let artifact_uuid = create_artifact(&directory);
+    let target = directory.path().join("export");
+
+    command(&directory)
+        .args(["dump", target.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout("");
+
+    assert_eq!(
+        std::fs::read_to_string(target.join("ARE-1175/task.md")).unwrap(),
+        "Task body\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.join(format!(
+            "ARE-1175/research/research--{}.md",
+            &artifact_uuid[..8]
+        )))
+        .unwrap(),
+        "# Findings\n\nOld\n"
+    );
+}
+
+#[test]
+fn dump_with_task_key_limits_output_and_includes_archived_tasks_by_default() {
+    let directory = tempfile::tempdir().unwrap();
+    create_task(&directory);
+    create_artifact(&directory);
+    stdout(
+        command(&directory)
+            .args(["task", "create", "ARE-2"])
+            .write_stdin("Other task\n"),
+    );
+    command(&directory)
+        .args(["task", "archive", "ARE-2"])
+        .assert()
+        .success();
+
+    let single = tempfile::tempdir().unwrap();
+    let single_target = single.path().join("export");
+    command(&directory)
+        .args(["dump", "ARE-1175", single_target.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(single_target.join("ARE-1175/task.md").is_file());
+    assert!(!single_target.join("ARE-2").exists());
+
+    let all = tempfile::tempdir().unwrap();
+    let all_target = all.path().join("export");
+    command(&directory)
+        .args(["dump", all_target.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(all_target.join("ARE-1175/task.md").is_file());
+    assert!(all_target.join("ARE-2/task.md").is_file());
+
+    command(&directory)
+        .args(["dump", "missing", all.path().join("export2").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("task not found"));
+}
+
+#[test]
+fn dump_suffixes_duplicate_artifact_names_and_sanitizes_unsafe_components() {
+    let directory = tempfile::tempdir().unwrap();
+    create_task(&directory);
+    let _ = stdout(
+        command(&directory)
+            .args([
+                "artifact",
+                "create",
+                "ARE-1175",
+                "a/b",
+                "--name",
+                "findings.md",
+            ])
+            .write_stdin("first"),
+    );
+    let second = stdout(
+        command(&directory)
+            .args([
+                "artifact",
+                "create",
+                "ARE-1175",
+                "a/b",
+                "--name",
+                "findings.md",
+            ])
+            .write_stdin("second"),
+    )
+    .trim()
+    .to_owned();
+
+    let target = directory.path().join("export");
+    command(&directory)
+        .args(["dump", target.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let folder = target.join("ARE-1175/a_b");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("findings.md")).unwrap(),
+        "first"
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join(format!("findings--{}.md", &second[..8])))
+            .unwrap(),
+        "second"
+    );
+}
+
+#[test]
+fn dump_zip_writes_one_archive_with_the_same_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    create_task(&directory);
+    let artifact_uuid = create_artifact(&directory);
+    stdout(
+        command(&directory)
+            .args(["task", "create", "ARE-2"])
+            .write_stdin("Other task\n"),
+    );
+
+    let target = directory.path().join("export.zip");
+    command(&directory)
+        .args(["dump", "--zip", "ARE-1175", target.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout("");
+
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&target).unwrap()).unwrap();
+    let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    assert_eq!(
+        names,
+        vec![
+            "ARE-1175/task.md".to_owned(),
+            format!("ARE-1175/research/research--{}.md", &artifact_uuid[..8]),
+        ]
+    );
+    let mut file = archive.by_name("ARE-1175/task.md").unwrap();
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents).unwrap();
+    assert_eq!(contents, "Task body\n");
+}
+
+#[test]
+fn dump_rejects_a_file_target_for_a_directory_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    create_task(&directory);
+    let target = directory.path().join("occupied");
+    std::fs::write(&target, "not a directory").unwrap();
+
+    command(&directory)
+        .args(["dump", target.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not a directory"));
+}
+
+#[test]
 fn create_read_list_search_and_context_stdout_contracts() {
     let directory = tempfile::tempdir().unwrap();
     let task_uuid = create_task(&directory);

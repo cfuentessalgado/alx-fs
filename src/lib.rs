@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     error::Error as StdError,
     fmt, fs,
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Command,
@@ -26,6 +27,10 @@ use pulldown_cmark::{Options, Parser, html};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zip::{
+    CompressionMethod, ZipWriter,
+    write::SimpleFileOptions,
+};
 
 const SCHEMA: &str = include_str!("schema.sql");
 const INDEX_HTML: &str = include_str!("web/index.html");
@@ -677,6 +682,46 @@ impl App {
         Ok(output)
     }
 
+    pub fn dump(&self, target: &Path, task_key: Option<&str>, zip: bool) -> Result<()> {
+        let tasks = match task_key {
+            Some(key) => vec![self.read_task(key)?],
+            None => {
+                let mut tasks = self.list_tasks()?;
+                tasks.extend(self.list_archived_tasks()?);
+                tasks
+            }
+        };
+        let mut files: Vec<(String, String)> = Vec::new();
+        let mut used_task_dirs: Vec<String> = Vec::new();
+        for task in tasks {
+            let task_dir = unique_component(&task.id, &task.uuid, &mut used_task_dirs);
+            files.push((format!("{task_dir}/task.md"), task.body.clone()));
+            let artifacts = self.list_artifacts(&task.uuid, None)?;
+            let mut artifacts_by_type: BTreeMap<&str, Vec<&Artifact>> = BTreeMap::new();
+            for artifact in &artifacts {
+                artifacts_by_type
+                    .entry(artifact.artifact_type.as_str())
+                    .or_default()
+                    .push(artifact);
+            }
+            for (artifact_type, artifacts) in artifacts_by_type {
+                let type_dir = format!("{task_dir}/{}", safe_component(artifact_type));
+                let mut used_names: Vec<String> = Vec::new();
+                for artifact in artifacts {
+                    let name =
+                        unique_component(&artifact.display_name(), &artifact.uuid, &mut used_names);
+                    files.push((format!("{type_dir}/{name}"), artifact.body.clone()));
+                }
+            }
+        }
+        if zip {
+            write_zip(target, &files)?;
+        } else {
+            write_directory(target, &files)?;
+        }
+        Ok(())
+    }
+
     pub fn migration_versions(&self) -> Result<Vec<i64>> {
         let connection = self.connect()?;
         let mut statement =
@@ -1023,6 +1068,99 @@ impl IntoResponse for ApiError {
         )
             .into_response()
     }
+}
+
+fn write_directory(target: &Path, files: &[(String, String)]) -> Result<()> {
+    if target.exists() && !target.is_dir() {
+        bail!(
+            "dump target exists and is not a directory: {}",
+            target.display()
+        );
+    }
+    fs::create_dir_all(target)
+        .with_context(|| format!("failed to create dump directory {}", target.display()))?;
+    for (path, contents) in files {
+        let file_path = target.join(path);
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&file_path, contents)
+            .with_context(|| format!("failed to write {}", file_path.display()))?;
+    }
+    Ok(())
+}
+
+fn write_zip(target: &Path, files: &[(String, String)]) -> Result<()> {
+    if let Some(parent) = target.parent() && !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent)?;
+    }
+    let file =
+        fs::File::create(target).with_context(|| format!("failed to create {}", target.display()))?;
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    for (path, contents) in files {
+        writer
+            .start_file(path.as_str(), options)
+            .with_context(|| format!("failed to add {path} to archive"))?;
+        writer
+            .write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write {path} to archive"))?;
+    }
+    writer
+        .finish()
+        .with_context(|| format!("failed to finish archive {}", target.display()))?;
+    Ok(())
+}
+
+fn safe_component(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control()
+            || matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            )
+        {
+            output.push('_');
+        } else {
+            output.push(character);
+        }
+    }
+    let output = output.trim().trim_end_matches(['.', ' ']).to_owned();
+    if output.is_empty() {
+        "unnamed".to_owned()
+    } else {
+        output
+    }
+}
+
+fn unique_component(name: &str, uuid: &str, used: &mut Vec<String>) -> String {
+    let candidate = safe_component(name);
+    if is_unused(&candidate, used) {
+        used.push(candidate.clone());
+        return candidate;
+    }
+    let (stem, extension) = match candidate.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
+            (stem.to_owned(), format!(".{extension}"))
+        }
+        _ => (candidate.clone(), String::new()),
+    };
+    let prefix = format!("{stem}--{}", &uuid[..8]);
+    let mut attempt = format!("{prefix}{extension}");
+    let mut counter = 2;
+    while !is_unused(&attempt, used) {
+        attempt = format!("{prefix}-{counter}{extension}");
+        counter += 1;
+    }
+    used.push(attempt.clone());
+    attempt
+}
+
+fn is_unused(candidate: &str, used: &[String]) -> bool {
+    !used
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(candidate))
 }
 
 fn now() -> String {

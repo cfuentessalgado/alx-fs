@@ -104,6 +104,19 @@ uuid<TAB>kind<TAB>start_offset<TAB>end_offset<TAB>resolved_at
 
 Resolved annotations are hidden unless `--all` is used. Resolve has no stdout on success.
 
+## Export
+
+```bash
+alx dump ./export
+alx dump ARE-1175 ./export
+alx dump --zip ./export.zip
+alx dump ARE-1175 --zip ./export.zip
+```
+
+`dump` writes a readable file tree for handoff or backup. Each task gets `TARGET/<task id>/task.md` and one file per artifact under `TARGET/<task id>/<artifact type>/<artifact name>`. The last argument is always the target path; an optional task key before it limits the dump to that task. Without a task key, all tasks are dumped, including archived ones. Annotations are not exported. Dump has no stdout and does not modify the database. Existing files at the target are overwritten.
+
+Ids and names that are unsafe as path components have unsafe characters replaced with `_`, and duplicate names in the same folder get a `--<UUID prefix>` suffix. `--zip` writes one zip archive at the target path instead of a directory tree.
+
 ## Web UI
 
 ```bash
@@ -116,7 +129,7 @@ The default is `127.0.0.1:3000`. `--bind` accepts an explicit `IP:PORT`. Port `0
 
 Remote binding has no user authentication in v1. Anyone who can reach the selected IP and port can create and read stored content, update task bodies, manage annotations, archive tasks, and permanently delete tasks. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
 
-The embedded UI browses active and archived tasks and artifacts in type folders. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, creates annotations from selected rendered text, resolves annotations, and shows unresolved feedback. Mermaid fenced code blocks are rendered with Mermaid 11 loaded from jsDelivr; if the CDN is unavailable, the diagram source stays visible. Rendered Markdown cannot load images. Editing task bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
+The embedded UI browses active and archived tasks and artifacts in type folders. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, creates annotations from selected rendered text, resolves annotations, and shows unresolved feedback. Mermaid fenced code blocks are rendered with Mermaid 11 loaded from jsDelivr. That CDN request is the only external network request the UI makes, so the UI is not fully offline; if the CDN is unreachable, the diagram source stays visible. Rendered Markdown cannot load images or other remote resources. Editing task bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
 
 ## Pipeline behavior
 

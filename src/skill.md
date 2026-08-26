@@ -87,3 +87,20 @@ printf '%s' 'Comment text' | alx annotation create ARTIFACT_UUID comment
 ```
 
 Supported annotation kinds are `comment`, `question`, `scratch`, and `good`. If text offsets are used, supply both `--start-offset` and `--end-offset`.
+
+## Export
+
+Write a readable file tree for handoff or backup:
+
+```bash
+alx dump ./export
+alx dump ARE-1175 ./export
+```
+
+The last argument is always the target path; an optional task key before it limits the dump to that task. Without a task key, all tasks are dumped, including archived ones. Each task gets `TARGET/<task id>/task.md` and one file per artifact under `TARGET/<task id>/<type>/<artifact name>`. Annotations are not exported. Add `--zip` to write one zip archive at the target path instead of a directory tree:
+
+```bash
+alx dump --zip ./export.zip
+```
+
+Dump has no stdout and does not modify the database.

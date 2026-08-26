@@ -18,6 +18,7 @@ enum Command {
     Annotation(AnnotationArgs),
     Skill(SkillArgs),
     Serve(ServeArgs),
+    Dump(DumpArgs),
 }
 
 #[derive(Debug, Args)]
@@ -145,6 +146,16 @@ enum SkillCommand {
 }
 
 #[derive(Debug, Args)]
+struct DumpArgs {
+    /// Optional task key followed by the target path; the last value is always the target
+    #[arg(num_args = 1..=2, required = true, value_name = "[TASK] TARGET")]
+    args: Vec<String>,
+    /// Write a zip archive at the target path instead of a directory tree
+    #[arg(long)]
+    zip: bool,
+}
+
+#[derive(Debug, Args)]
 struct ServeArgs {
     #[arg(long, value_name = "IP:PORT", conflicts_with = "tailscale")]
     bind: Option<String>,
@@ -165,6 +176,7 @@ async fn main() -> Result<()> {
             let address = parse_bind_address(args.bind.as_deref(), args.tailscale)?;
             alx::serve(App::from_env()?, address).await?;
         }
+        Command::Dump(args) => run_dump(&App::from_env()?, args)?,
     }
     Ok(())
 }
@@ -329,6 +341,15 @@ fn run_annotation(app: &App, command: AnnotationCommand) -> Result<()> {
         AnnotationCommand::Resolve { uuid } => app.resolve_annotation(&uuid)?,
     }
     Ok(())
+}
+
+fn run_dump(app: &App, args: DumpArgs) -> Result<()> {
+    let (task_key, target) = match args.args.as_slice() {
+        [target] => (None, target.as_str()),
+        [task_key, target] => (Some(task_key.as_str()), target.as_str()),
+        _ => bail!("dump accepts an optional task key followed by one target path"),
+    };
+    app.dump(std::path::Path::new(target), task_key, args.zip)
 }
 
 fn run_skill(command: SkillCommand) -> Result<()> {
