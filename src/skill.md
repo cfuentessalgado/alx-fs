@@ -21,7 +21,7 @@ Create a task only when requested:
 printf '%s\n' 'Task instructions' | alx task create TASK_ID
 ```
 
-Task creation prints the task UUID. Use `alx task read`, `alx task list`, or `alx task search QUERY` for narrower queries. Add `--json` to list and search commands when structured output is useful.
+Task creation prints the task UUID. Use `alx task context` as the preferred broad read. Use `alx task read TASK_ID_OR_UUID` as the narrow source of truth for the task body. Use `alx task list` and `alx task search QUERY` to find tasks. Add `--json` to list and search commands when structured output is useful.
 
 Update a task body only when the task instructions change:
 
@@ -72,7 +72,7 @@ Get agent-ready review instructions before revising an artifact:
 alx artifact review ARTIFACT_UUID
 ```
 
-Use `alx artifact feedback ARTIFACT_UUID` for raw unresolved annotation output. Add `--json` when exact annotation fields or offsets are needed. After handling an annotation, resolve it:
+Use `alx artifact feedback ARTIFACT_UUID` for raw unresolved annotation output. Add `--json` when exact annotation fields or offsets are needed. Resolve an annotation only after its feedback has been addressed or deliberately declined:
 
 ```bash
 alx annotation resolve ANNOTATION_UUID
@@ -90,7 +90,7 @@ Supported annotation kinds are `comment`, `question`, `scratch`, and `good`. If 
 
 ## Export
 
-Write a readable file tree for handoff or backup:
+Write a readable file tree for backup, inspection, or leaving `alx`:
 
 ```bash
 alx dump ./export
