@@ -92,7 +92,7 @@ The default is `127.0.0.1:3000`. `--bind` accepts an explicit `IP:PORT`. Port `0
 
 Remote binding has no user authentication in v1. Anyone who can reach the selected IP and port can read stored content and manage annotations. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
 
-The embedded UI browses tasks and artifacts, renders sanitized Markdown, creates annotations from selected rendered text, resolves annotations, and shows unresolved feedback. Rendered Markdown cannot load images. Browser editing is not part of v1.
+The embedded UI browses tasks and artifacts, renders sanitized Markdown, creates annotations from selected rendered text, resolves annotations, and shows unresolved feedback. Mermaid fenced code blocks are rendered with Mermaid 11 loaded from jsDelivr; if the CDN is unavailable, the diagram source stays visible. Rendered Markdown cannot load images. Browser editing is not part of v1.
 
 ## Pipeline behavior
 

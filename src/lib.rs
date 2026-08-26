@@ -125,6 +125,7 @@ pub struct NewAnnotation {
 struct TaskView {
     task: Task,
     artifacts: Vec<Artifact>,
+    rendered_task_html: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -607,7 +608,7 @@ async fn index() -> impl IntoResponse {
     (
         [(
             header::CONTENT_SECURITY_POLICY,
-            "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; img-src 'none'; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
+            "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; img-src 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'",
         )],
         Html(INDEX_HTML),
     )
@@ -671,7 +672,12 @@ async fn api_task(
 ) -> ApiResult<Json<TaskView>> {
     let task = app.read_task(&key)?;
     let artifacts = app.list_artifacts(&task.uuid, None)?;
-    Ok(Json(TaskView { task, artifacts }))
+    let rendered_task_html = render_markdown(&task.body);
+    Ok(Json(TaskView {
+        task,
+        artifacts,
+        rendered_task_html,
+    }))
 }
 
 async fn api_artifact(
@@ -712,6 +718,7 @@ pub fn render_markdown(markdown: &str) -> String {
     html::push_html(&mut unsafe_html, parser);
     ammonia::Builder::default()
         .rm_tags(&["img"])
+        .add_allowed_classes("code", &["language-mermaid"])
         .clean(&unsafe_html)
         .to_string()
 }

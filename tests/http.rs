@@ -44,6 +44,10 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     .await;
     assert!(root.starts_with("HTTP/1.1 200"), "{root:?}");
     assert!(response_body(&root).contains("function selectionOffsets"));
+    assert!(response_body(&root).contains("Artifact Explorer"));
+    assert!(response_body(&root).contains("task.md"));
+    assert!(response_body(&root).contains("annotation-dialog"));
+    assert!(response_body(&root).contains("mermaid@11.12.3"));
     assert!(root.contains("content-security-policy:"));
 
     let task_response = raw_http(
@@ -57,6 +61,7 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(task_response.starts_with("HTTP/1.1 200"));
     let task_view: Value = serde_json::from_str(response_body(&task_response)).unwrap();
     assert_eq!(task_view["artifacts"][0]["uuid"], artifact.uuid);
+    assert_eq!(task_view["rendered_task_html"], "<p>Body</p>\n");
 
     // Browser strings use UTF-16 units. Selecting the emoji in A😀B spans offsets 1..3.
     let body = json!({
@@ -100,7 +105,7 @@ async fn http_routes_share_storage_and_sanitize_markdown() {
         .create_artifact(
             &task.uuid,
             "design",
-            "# Safe\n<script>alert(1)</script>\n[bad](javascript:alert(1))\n![tracker](https://example.invalid/pixel)",
+            "# Safe\n<script>alert(1)</script>\n[bad](javascript:alert(1))\n![tracker](https://example.invalid/pixel)\n\n```mermaid\ngraph TD\n  A --> B\n```",
         )
         .unwrap();
     let service = router(app.clone());
@@ -133,6 +138,8 @@ async fn http_routes_share_storage_and_sanitize_markdown() {
     assert!(!html.contains("javascript:"));
     assert!(!html.contains("<img"));
     assert!(!html.contains("example.invalid"));
+    assert!(html.contains("class=\"language-mermaid\""));
+    assert!(html.contains("graph TD"));
 
     let response = service
         .clone()
