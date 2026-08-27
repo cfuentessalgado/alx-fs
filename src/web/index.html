@@ -142,10 +142,20 @@ button { cursor: pointer; }
 .annotations h2 { margin: 0; font-size: 14px; }
 .annotations-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
 .badge { min-width: 22px; border-radius: 20px; padding: 2px 7px; background: var(--border); color: var(--muted); font-size: 11px; text-align: center; }
-.annotation { margin-bottom: 10px; border: 1px solid var(--border); border-radius: 7px; padding: 12px; background: var(--surface); }
-.annotation-kind { margin-bottom: 8px; color: var(--accent-text); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
-.annotation blockquote { margin: 0 0 9px; border-left: 2px solid var(--quote); padding-left: 9px; color: var(--muted); font-size: 12px; }
+.annotation { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 7px; padding: 11px; background: var(--surface); cursor: pointer; transition: border-color .14s, background .14s, box-shadow .14s, transform .14s; }
+.annotation:hover, .annotation.is-preview { border-color: color-mix(in srgb, var(--annotation-color, var(--accent)) 55%, var(--border)); transform: translateY(-1px); }
+.annotation.is-selected { border-color: var(--annotation-color, var(--accent)); background: color-mix(in srgb, var(--annotation-color, var(--accent)) 8%, var(--surface)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--annotation-color, var(--accent)) 20%, transparent); }
+.annotation:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.annotation.kind-comment { --annotation-color: #cf8518; }
+.annotation.kind-question { --annotation-color: var(--accent); }
+.annotation.kind-scratch { --annotation-color: var(--danger); }
+.annotation.kind-good { --annotation-color: #298c59; }
+.annotation-kind { margin-bottom: 8px; color: var(--annotation-color, var(--accent-text)); font-size: 10px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+.annotation blockquote { max-height: 72px; overflow: hidden; margin: 0 0 9px; border-left: 2px solid var(--annotation-color, var(--quote)); padding-left: 9px; color: var(--muted); font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .annotation p { margin: 0 0 10px; white-space: pre-wrap; }
+.annotation .resolve-button { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: var(--muted); }
+.annotation .resolve-button:hover { border-color: var(--danger); color: var(--danger); }
+.annotation .resolve-button svg { width: 12px; height: 12px; }
 .muted { color: var(--muted); }
 .markdown-body { font: 16px/1.72 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow-wrap: break-word; }
 .markdown-body > :first-child { margin-top: 0 !important; }
@@ -178,13 +188,44 @@ button { cursor: pointer; }
 .markdown-body .mermaid { display: flex; justify-content: center; max-width: 100%; margin: 1.5em 0; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 24px 16px; background: var(--surface); }
 .markdown-body .mermaid svg { max-width: 100%; height: auto; }
 .diagram-error { margin: -.65em 0 1.15em; color: var(--danger); font-size: 12px; }
-.selection-menu { position: fixed; z-index: 35; display: flex; gap: 2px; border: 1px solid var(--border-strong); border-radius: 8px; padding: 4px; background: var(--surface-raised); box-shadow: var(--shadow); }
+.annotation-highlight { border-radius: 2px; padding: 1px 0; background: color-mix(in srgb, #cf8518 24%, transparent); color: inherit; box-decoration-break: clone; -webkit-box-decoration-break: clone; cursor: pointer; transition: background .14s, box-shadow .14s; }
+.annotation-highlight.kind-comment { border-bottom: 2px solid #cf8518; background: color-mix(in srgb, #cf8518 24%, transparent); }
+.annotation-highlight.kind-question { border-bottom: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 19%, transparent); }
+.annotation-highlight.kind-scratch { border-bottom: 2px solid var(--danger); background: color-mix(in srgb, var(--danger) 18%, transparent); }
+.annotation-highlight.kind-good { border-bottom: 2px solid #298c59; background: color-mix(in srgb, #298c59 20%, transparent); }
+.annotation-highlight:hover, .annotation-highlight.is-preview { filter: brightness(1.12); }
+.annotation-highlight.is-focused { background: color-mix(in srgb, var(--accent) 34%, transparent) !important; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 24%, transparent); }
+.annotation-highlight.is-draft { border-bottom: 2px solid #cf8518; background: color-mix(in srgb, #cf8518 32%, transparent); box-shadow: 0 0 0 2px color-mix(in srgb, #cf8518 18%, transparent); }
+.selection-menu { position: fixed; z-index: 35; display: flex; gap: 3px; border: 1px solid var(--border-strong); border-radius: 9px; padding: 4px; background: color-mix(in srgb, var(--surface-raised) 94%, var(--text)); box-shadow: 0 10px 30px #0004; animation: selection-menu-in .12s ease-out; }
 .selection-menu[hidden] { display: none; }
-.selection-menu button { border: 0; border-radius: 5px; padding: 6px 8px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 650; }
-.selection-menu button:hover { background: var(--accent-soft); color: var(--accent-text); }
+.selection-menu button { display: flex; align-items: center; gap: 5px; border: 0; border-radius: 6px; padding: 7px 9px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 680; }
+.selection-menu button::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--choice-color); box-shadow: 0 0 0 2px color-mix(in srgb, var(--choice-color) 20%, transparent); }
+.selection-menu button[data-pop-kind="comment"] { --choice-color: #cf8518; }
+.selection-menu button[data-pop-kind="question"] { --choice-color: var(--accent); }
+.selection-menu button[data-pop-kind="scratch"] { --choice-color: var(--danger); }
+.selection-menu button[data-pop-kind="good"] { --choice-color: #298c59; }
+.selection-menu button:hover, .selection-menu button:focus-visible { background: color-mix(in srgb, var(--choice-color) 14%, transparent); color: var(--text); outline: none; }
+@keyframes selection-menu-in { from { opacity: 0; transform: translateY(3px) scale(.98); } }
 dialog.composer-dialog { width: min(600px, calc(100vw - 28px)); max-height: min(760px, calc(100vh - 28px)); overflow: auto; border: 1px solid var(--border-strong); border-radius: 11px; padding: 0; background: var(--surface-raised); color: var(--text); box-shadow: 0 24px 80px #0007; }
+dialog.annotation-dialog.annotation-anchored { position: fixed; z-index: 40; inset: auto; width: min(390px, calc(100vw - 28px)); max-height: min(360px, calc(100vh - 28px)); margin: 0; overflow: hidden; box-shadow: 0 16px 48px #0006; }
 dialog.composer-dialog::backdrop { background: #0a0d14a8; backdrop-filter: blur(3px); }
 .annotation-form, .creation-form { padding: 0; }
+.annotation-popover-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 38px; padding: 5px 6px 5px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.annotation-popover-kind { display: inline-flex; align-items: center; gap: 5px; color: var(--popover-kind-color, var(--accent-text)); font-size: 10px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+.annotation-popover-kind::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--popover-kind-color, var(--accent)); }
+.annotation-popover-kind.kind-comment { --popover-kind-color: #cf8518; }
+.annotation-popover-kind.kind-question { --popover-kind-color: var(--accent); }
+.annotation-popover-kind.kind-scratch { --popover-kind-color: var(--danger); }
+.annotation-popover-kind.kind-good { --popover-kind-color: #298c59; }
+.annotation-popover-selection { overflow: hidden; color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.annotation-popover-head .close-button { width: 28px; height: 28px; font-size: 18px; }
+.annotation-popover-body { padding: 0; }
+.annotation-popover-body .annotation-note { min-height: 94px; border: 0; border-radius: 0; padding: 12px; background: var(--surface-raised); resize: vertical; }
+.annotation-popover-body .annotation-note:focus { box-shadow: none; }
+.annotation-popover-body .composer-error { min-height: 0; margin: 0; padding: 0 12px; }
+.annotation-popover-body .composer-error:not(:empty) { padding-block: 7px; border-top: 1px solid var(--border); }
+.annotation-popover-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px 7px 11px; border-top: 1px solid var(--border); background: var(--panel); }
+.annotation-popover-footer .primary-button { padding: 6px 10px; }
 .form-field { display: block; margin-bottom: 18px; }
 .form-field:last-child { margin-bottom: 0; }
 .text-input, .body-editor { display: block; width: 100%; border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px; background: var(--surface); color: var(--text); outline: none; }
@@ -197,14 +238,7 @@ dialog.composer-dialog::backdrop { background: #0a0d14a8; backdrop-filter: blur(
 .close-button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 20px; line-height: 1; }
 .close-button:hover { background: var(--panel); color: var(--text); }
 .composer-body { padding: 20px 22px; }
-.composer-label, .kind-fieldset legend { display: block; margin-bottom: 8px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
-.selection-quote { max-height: 132px; overflow: auto; margin: 0 0 20px; border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; padding: 10px 12px; background: var(--panel); color: var(--muted); white-space: pre-wrap; }
-.kind-fieldset { margin: 0 0 20px; border: 0; padding: 0; }
-.kind-options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
-.kind-option input { position: absolute; opacity: 0; pointer-events: none; }
-.kind-option span { display: block; border: 1px solid var(--border); border-radius: 7px; padding: 9px 6px; background: var(--surface); text-align: center; font-size: 12px; font-weight: 600; cursor: pointer; }
-.kind-option input:checked + span { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); box-shadow: inset 0 0 0 1px var(--accent); }
-.kind-option input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-label { display: block; margin-bottom: 8px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .annotation-note { display: block; width: 100%; min-height: 120px; resize: vertical; border: 1px solid var(--border); border-radius: 7px; padding: 10px 11px; background: var(--surface); color: var(--text); font: inherit; outline: none; }
 .annotation-note:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .composer-error { min-height: 18px; margin: 7px 0 0; color: var(--danger); font-size: 12px; }
@@ -228,7 +262,8 @@ dialog.composer-dialog::backdrop { background: #0a0d14a8; backdrop-filter: blur(
   .document-head { display: block; }
   .feedback-actions { justify-content: flex-start; margin-top: 18px; }
   .selection-hint { text-align: left; }
-  .kind-options { grid-template-columns: repeat(2, 1fr); }
+  dialog.annotation-dialog.annotation-anchored { inset: auto 14px 14px 14px; width: auto; max-height: calc(100vh - 28px); }
+  .annotation-popover-body .annotation-note { min-height: 110px; }
   .composer-footer { align-items: flex-end; }
   .keyboard-hint { display: none; }
 }
@@ -305,38 +340,27 @@ dialog.composer-dialog::backdrop { background: #0a0d14a8; backdrop-filter: blur(
     </footer>
   </form>
 </dialog>
-<dialog id="annotation-dialog" class="annotation-dialog composer-dialog" aria-labelledby="composer-title">
+<dialog id="annotation-dialog" class="annotation-dialog composer-dialog" aria-label="Add annotation">
   <form id="annotation-form" class="annotation-form">
-    <header class="composer-head">
-      <div><h2 id="composer-title">Add feedback</h2><p>Attach feedback to the selected text.</p></div>
+    <header class="annotation-popover-head">
+      <span id="annotation-kind" class="annotation-popover-kind"></span>
+      <span id="composer-selection" class="annotation-popover-selection"></span>
       <button id="composer-close" class="close-button" type="button" aria-label="Close">×</button>
     </header>
-    <div class="composer-body">
-      <span class="composer-label">Selected text</span>
-      <blockquote id="composer-selection" class="selection-quote"></blockquote>
-      <fieldset class="kind-fieldset">
-        <legend>Feedback type</legend>
-        <div class="kind-options">
-          <label class="kind-option"><input type="radio" name="kind" value="comment" checked><span>Comment</span></label>
-          <label class="kind-option"><input type="radio" name="kind" value="question"><span>Question</span></label>
-          <label class="kind-option"><input type="radio" name="kind" value="scratch"><span>Scratch</span></label>
-          <label class="kind-option"><input type="radio" name="kind" value="good"><span>Good</span></label>
-        </div>
-      </fieldset>
-      <label class="composer-label" for="annotation-note">Note <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
-      <textarea id="annotation-note" class="annotation-note" placeholder="Add context, a question, or a suggested change…"></textarea>
+    <div class="annotation-popover-body">
+      <textarea id="annotation-note" class="annotation-note" aria-label="Annotation" placeholder="Add a note…"></textarea>
       <p id="composer-error" class="composer-error" role="alert"></p>
     </div>
-    <footer class="composer-footer">
-      <span class="keyboard-hint">⌘/Ctrl + Enter to save</span>
-      <div class="composer-buttons"><button id="composer-cancel" class="secondary-button" type="button">Cancel</button><button id="composer-save" class="primary-button" type="submit">Add feedback</button></div>
+    <footer class="annotation-popover-footer">
+      <span class="keyboard-hint">⌘/Ctrl + Enter</span>
+      <button id="composer-save" class="primary-button" type="submit">Save</button>
     </footer>
   </form>
 </dialog>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11.12.3/dist/mermaid.min.js" integrity="sha384-jFhLSLFn4m565eRAS0CDMWubMqOtfZWWbE8kqgGdU+VHbJ3B2G/4X8u+0BM8MtdU" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
-const treeEl=document.querySelector('#tree'),viewEl=document.querySelector('#view'),breadcrumbsEl=document.querySelector('#breadcrumbs'),statusEl=document.querySelector('#status'),filterEl=document.querySelector('#filter'),selectionMenuEl=document.querySelector('#selection-menu'),taskDialogEl=document.querySelector('#task-dialog'),taskFormEl=document.querySelector('#task-form'),taskIdEl=document.querySelector('#task-id'),taskBodyEl=document.querySelector('#task-body'),taskFormErrorEl=document.querySelector('#task-form-error'),taskSaveEl=document.querySelector('#task-save'),taskEditDialogEl=document.querySelector('#task-edit-dialog'),taskEditFormEl=document.querySelector('#task-edit-form'),taskEditBodyEl=document.querySelector('#task-edit-body'),taskEditErrorEl=document.querySelector('#task-edit-error'),taskEditSaveEl=document.querySelector('#task-edit-save'),artifactDialogEl=document.querySelector('#artifact-dialog'),artifactFormEl=document.querySelector('#artifact-form'),artifactTypeEl=document.querySelector('#artifact-type'),artifactNameEl=document.querySelector('#artifact-name'),artifactBodyEl=document.querySelector('#artifact-body'),artifactFormErrorEl=document.querySelector('#artifact-form-error'),artifactSaveEl=document.querySelector('#artifact-save'),annotationDialogEl=document.querySelector('#annotation-dialog'),annotationFormEl=document.querySelector('#annotation-form'),annotationNoteEl=document.querySelector('#annotation-note'),composerSelectionEl=document.querySelector('#composer-selection'),composerErrorEl=document.querySelector('#composer-error'),composerSaveEl=document.querySelector('#composer-save');
-const state={tasks:[],archivedTasks:[],task:null,fileNames:new Map(),routeVersion:0,pendingAnnotation:null};
+const treeEl=document.querySelector('#tree'),viewEl=document.querySelector('#view'),breadcrumbsEl=document.querySelector('#breadcrumbs'),statusEl=document.querySelector('#status'),filterEl=document.querySelector('#filter'),selectionMenuEl=document.querySelector('#selection-menu'),taskDialogEl=document.querySelector('#task-dialog'),taskFormEl=document.querySelector('#task-form'),taskIdEl=document.querySelector('#task-id'),taskBodyEl=document.querySelector('#task-body'),taskFormErrorEl=document.querySelector('#task-form-error'),taskSaveEl=document.querySelector('#task-save'),taskEditDialogEl=document.querySelector('#task-edit-dialog'),taskEditFormEl=document.querySelector('#task-edit-form'),taskEditBodyEl=document.querySelector('#task-edit-body'),taskEditErrorEl=document.querySelector('#task-edit-error'),taskEditSaveEl=document.querySelector('#task-edit-save'),artifactDialogEl=document.querySelector('#artifact-dialog'),artifactFormEl=document.querySelector('#artifact-form'),artifactTypeEl=document.querySelector('#artifact-type'),artifactNameEl=document.querySelector('#artifact-name'),artifactBodyEl=document.querySelector('#artifact-body'),artifactFormErrorEl=document.querySelector('#artifact-form-error'),artifactSaveEl=document.querySelector('#artifact-save'),annotationDialogEl=document.querySelector('#annotation-dialog'),annotationFormEl=document.querySelector('#annotation-form'),annotationNoteEl=document.querySelector('#annotation-note'),annotationKindEl=document.querySelector('#annotation-kind'),composerSelectionEl=document.querySelector('#composer-selection'),composerErrorEl=document.querySelector('#composer-error'),composerSaveEl=document.querySelector('#composer-save');
+const state={tasks:[],archivedTasks:[],task:null,fileNames:new Map(),routeVersion:0,pendingAnnotation:null,activeAnnotation:null,selectionRoot:null,selectionUuid:null};
 if(window.mermaid)window.mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',suppressErrorRendering:true});
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const icon=kind=>'<span class="icon '+kind+'" aria-hidden="true"></span>';
@@ -378,19 +402,29 @@ function renderArtifactDirectory(x,type){const taskPath='#/tasks/'+x.task.uuid,t
 function documentHeader(name,kind,updated,size,actions=''){return '<header class="document-head"><div class="document-title">'+icon('file')+'<div><h1>'+esc(name)+'</h1><p>'+esc(kind)+' · '+esc(formatDate(updated))+' · '+esc(formatSize(size))+'</p></div></div>'+actions+'</header>'}
 async function renderMermaid(root){const blocks=[...root.querySelectorAll('pre > code.language-mermaid')];if(!blocks.length)return;for(const code of blocks){const pre=code.parentElement,source=code.textContent;if(!window.mermaid){const message=document.createElement('p');message.className='diagram-error';message.textContent='Mermaid could not load. The diagram source is shown instead.';pre.after(message);continue}const diagram=document.createElement('div');diagram.className='mermaid';diagram.textContent=source;pre.replaceWith(diagram);try{await window.mermaid.run({nodes:[diagram]})}catch(error){console.error('Could not render Mermaid diagram',error);diagram.replaceWith(pre);const message=document.createElement('p');message.className='diagram-error';message.textContent='This Mermaid diagram could not be rendered.';pre.after(message)}}}
 function renderTaskDocument(x){const taskPath='#/tasks/'+x.task.uuid;crumbs([{label:'alx',path:''},{label:x.task.id,path:taskPath},{label:'task.md'}]);renderTree();viewEl.innerHTML='<div class="reader-shell" style="display:block"><section class="document-pane"><div class="document-card">'+documentHeader('task.md','Task',x.task.updated_at,x.task.body,taskActionButtons(x.task))+'<article class="markdown-body">'+x.rendered_task_html+'</article></div></section></div>';bindTaskActions(x.task);renderMermaid(viewEl.querySelector('.markdown-body'))}
-function selectionOffsets(root){const s=window.getSelection();if(!s||s.rangeCount!==1||s.isCollapsed)return null;const r=s.getRangeAt(0);if(!root.contains(r.commonAncestorContainer))return null;const before=document.createRange();before.selectNodeContents(root);before.setEnd(r.startContainer,r.startOffset);return{start_offset:before.toString().length,end_offset:before.toString().length+r.toString().length,selected_text:r.toString()}}
+function selectionOffsets(root){const s=window.getSelection();if(!s||s.rangeCount!==1||s.isCollapsed)return null;const r=s.getRangeAt(0).cloneRange(),limits=document.createRange();limits.selectNodeContents(root);let startPosition,endPosition;try{startPosition=limits.comparePoint(r.startContainer,r.startOffset);endPosition=limits.comparePoint(r.endContainer,r.endOffset)}catch{return null}if(startPosition>0||endPosition<0)return null;if(startPosition<0)r.setStart(limits.startContainer,limits.startOffset);if(endPosition>0)r.setEnd(limits.endContainer,limits.endOffset);if(r.collapsed)return null;const before=document.createRange();before.selectNodeContents(root);before.setEnd(r.startContainer,r.startOffset);const rect=r.getBoundingClientRect();return{start_offset:before.toString().length,end_offset:before.toString().length+r.toString().length,selected_text:r.toString(),rect:{left:rect.left,top:rect.top,right:rect.right,bottom:rect.bottom,width:rect.width,height:rect.height}}}
+function textNodes(root){const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);return nodes}
+function annotationBounds(root,annotation){const text=root.textContent||'',start=Number(annotation.start_offset),end=Number(annotation.end_offset),quote=annotation.selected_text||'';if(Number.isInteger(start)&&Number.isInteger(end)&&start>=0&&end>start&&end<=text.length&&(!quote||text.slice(start,end).trim()===quote.trim()))return{start,end};if(!quote)return null;let found=text.indexOf(quote),best=-1,distance=Infinity;while(found!==-1){const nextDistance=Number.isFinite(start)?Math.abs(found-start):0;if(nextDistance<distance){best=found;distance=nextDistance}found=text.indexOf(quote,found+1)}return best===-1?null:{start:best,end:best+quote.length}}
+function paintAnnotationHighlight(root,annotation,draft=false){const bounds=annotationBounds(root,annotation);if(!bounds)return[];let cursor=0;const targets=[];for(const node of textNodes(root)){const next=cursor+node.data.length;if(next>bounds.start&&cursor<bounds.end)targets.push({node,start:Math.max(0,bounds.start-cursor),end:Math.min(node.data.length,bounds.end-cursor)});cursor=next;if(cursor>=bounds.end)break}const marks=[];for(const target of targets.reverse()){if(target.end<=target.start)continue;const range=document.createRange();range.setStart(target.node,target.start);range.setEnd(target.node,target.end);const mark=document.createElement('mark');mark.className='annotation-highlight kind-'+annotation.kind+(draft?' is-draft':'');mark.dataset.annotationId=annotation.uuid;range.surroundContents(mark);marks.push(mark)}return marks}
+function clearDraftHighlights(){const root=document.querySelector('#rendered');if(!root)return;root.querySelectorAll('.annotation-highlight.is-draft').forEach(mark=>mark.replaceWith(...mark.childNodes));root.normalize()}
+function paintAnnotationHighlights(root,annotations){annotations.forEach(annotation=>paintAnnotationHighlight(root,annotation))}
+function annotationMatches(selector,id){return[...viewEl.querySelectorAll(selector)].filter(element=>element.dataset.annotationId===id)}
+function previewAnnotation(id,on){annotationMatches('.annotation-highlight',id).forEach(mark=>mark.classList.toggle('is-preview',on));annotationMatches('[data-annotation-card]',id).forEach(card=>card.classList.toggle('is-preview',on))}
+function focusAnnotation(id,scrollTo){state.activeAnnotation=id;viewEl.querySelectorAll('.annotation.is-selected').forEach(card=>card.classList.remove('is-selected'));viewEl.querySelectorAll('.annotation-highlight.is-focused').forEach(mark=>mark.classList.remove('is-focused'));const cards=annotationMatches('[data-annotation-card]',id),marks=annotationMatches('.annotation-highlight',id);cards.forEach(card=>card.classList.add('is-selected'));marks.forEach(mark=>mark.classList.add('is-focused'));const target=scrollTo==='document'?marks[0]:scrollTo==='panel'?cards[0]:null;if(target)target.scrollIntoView({behavior:'smooth',block:'center'})}
+function bindAnnotationInteractions(root){viewEl.querySelectorAll('[data-annotation-card]').forEach(card=>{const id=card.dataset.annotationId;card.onclick=event=>{if(event.target.closest('button'))return;focusAnnotation(id,'document')};card.onkeydown=event=>{if((event.key==='Enter'||event.key===' ')&&!event.target.closest('button')){event.preventDefault();focusAnnotation(id,'document')}};card.onmouseenter=()=>previewAnnotation(id,true);card.onmouseleave=()=>previewAnnotation(id,false)});root.querySelectorAll('.annotation-highlight').forEach(mark=>{const id=mark.dataset.annotationId;mark.onclick=event=>{event.preventDefault();event.stopPropagation();focusAnnotation(id,'panel')};mark.onmouseenter=()=>previewAnnotation(id,true);mark.onmouseleave=()=>previewAnnotation(id,false)});if(state.activeAnnotation)focusAnnotation(state.activeAnnotation)}
 function hideSelectionMenu(){selectionMenuEl.hidden=true}
-function showSelectionMenu(root,uuid){const selected=selectionOffsets(root);if(!selected){hideSelectionMenu();return}const range=window.getSelection().getRangeAt(0),rect=range.getBoundingClientRect();if(!rect.width&&!rect.height){hideSelectionMenu();return}state.pendingAnnotation={uuid,selected};selectionMenuEl.hidden=false;const width=selectionMenuEl.offsetWidth,height=selectionMenuEl.offsetHeight;selectionMenuEl.style.left=Math.max(10,Math.min(window.innerWidth-width-10,rect.left+rect.width/2-width/2))+'px';selectionMenuEl.style.top=Math.max(10,rect.top-height-9)+'px'}
-function bindSelectionMenu(root,uuid){const update=()=>setTimeout(()=>showSelectionMenu(root,uuid));root.addEventListener('mouseup',update);root.addEventListener('keyup',update)}
-function openAnnotation(uuid,kind='comment',selected=null){selected=selected||selectionOffsets(document.querySelector('#rendered'));if(!selected){hideSelectionMenu();fail(new Error('Select text in the document first.'));return}state.pendingAnnotation={uuid,selected};annotationFormEl.reset();annotationFormEl.elements.kind.value=kind;composerSelectionEl.textContent=selected.selected_text;composerErrorEl.textContent='';composerSaveEl.disabled=false;composerSaveEl.textContent='Add feedback';hideSelectionMenu();annotationDialogEl.showModal();annotationNoteEl.focus()}
-async function submitAnnotation(){const pending=state.pendingAnnotation;if(!pending)return;composerErrorEl.textContent='';composerSaveEl.disabled=true;composerSaveEl.textContent='Saving…';const kind=new FormData(annotationFormEl).get('kind'),body=annotationNoteEl.value.trim();try{await api('/api/artifacts/'+pending.uuid+'/annotations',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...pending.selected,kind,body:body||null})});annotationDialogEl.close();state.pendingAnnotation=null;window.getSelection()?.removeAllRanges();await showArtifact(pending.uuid,state.routeVersion)}catch(e){composerErrorEl.textContent=e.message||String(e);composerSaveEl.disabled=false;composerSaveEl.textContent='Add feedback'}}
-async function resolveAnnotation(id,artifactId){try{await api('/api/annotations/'+id+'/resolve',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});await showArtifact(artifactId,state.routeVersion)}catch(e){fail(e)}}
+function showSelectionMenu(root,uuid){if(annotationDialogEl.open)return;const selected=selectionOffsets(root);if(!selected||!selected.selected_text.trim()){hideSelectionMenu();return}const rect=selected.rect;if(!rect.width&&!rect.height){hideSelectionMenu();return}state.pendingAnnotation={uuid,selected};selectionMenuEl.hidden=false;const width=selectionMenuEl.offsetWidth,height=selectionMenuEl.offsetHeight;selectionMenuEl.style.left=Math.max(10,Math.min(window.innerWidth-width-10,rect.left+rect.width/2-width/2))+'px';const above=rect.top-height-9;selectionMenuEl.style.top=(above>=10?above:Math.min(window.innerHeight-height-10,rect.bottom+9))+'px'}
+function bindSelectionMenu(root,uuid){root.addEventListener('pointerdown',()=>{state.selectionRoot=root;state.selectionUuid=uuid});root.addEventListener('keyup',()=>setTimeout(()=>showSelectionMenu(root,uuid)))}
+function positionAnnotationDialog(rect){annotationDialogEl.classList.add('annotation-anchored');annotationDialogEl.style.left='';annotationDialogEl.style.top='';if(!rect||window.innerWidth<=700)return;const width=annotationDialogEl.offsetWidth,height=annotationDialogEl.offsetHeight,left=Math.max(14,Math.min(window.innerWidth-width-14,rect.left+rect.width/2-width/2));let top=rect.bottom+12;if(top+height>window.innerHeight-14)top=Math.max(14,rect.top-height-12);annotationDialogEl.style.left=left+'px';annotationDialogEl.style.top=top+'px'}
+function openAnnotation(uuid,kind='comment',selected=null){selected=selected||selectionOffsets(document.querySelector('#rendered'));if(!selected||!selected.selected_text.trim()){hideSelectionMenu();fail(new Error('Select text in the document first.'));return}state.pendingAnnotation={uuid,selected,kind};annotationFormEl.reset();annotationKindEl.textContent=kind;annotationKindEl.className='annotation-popover-kind kind-'+kind;composerSelectionEl.textContent=selected.selected_text;composerSelectionEl.title=selected.selected_text;composerErrorEl.textContent='';composerSaveEl.disabled=false;composerSaveEl.textContent='Save';hideSelectionMenu();clearDraftHighlights();paintAnnotationHighlight(document.querySelector('#rendered'),{uuid:'draft',kind,start_offset:selected.start_offset,end_offset:selected.end_offset,selected_text:selected.selected_text},true);window.getSelection()?.removeAllRanges();const scrollX=window.scrollX,scrollY=window.scrollY;annotationDialogEl.show();positionAnnotationDialog(selected.rect);annotationNoteEl.focus({preventScroll:true});if(window.scrollX!==scrollX||window.scrollY!==scrollY)window.scrollTo(scrollX,scrollY)}
+async function submitAnnotation(){const pending=state.pendingAnnotation;if(!pending)return;composerErrorEl.textContent='';composerSaveEl.disabled=true;composerSaveEl.textContent='Saving…';const kind=pending.kind,body=annotationNoteEl.value.trim(),{rect,...selection}=pending.selected;try{await api('/api/artifacts/'+pending.uuid+'/annotations',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...selection,kind,body:body||null})});annotationDialogEl.close();clearDraftHighlights();state.pendingAnnotation=null;window.getSelection()?.removeAllRanges();await showArtifact(pending.uuid,state.routeVersion)}catch(e){composerErrorEl.textContent=e.message||String(e);composerSaveEl.disabled=false;composerSaveEl.textContent='Save'}}
+async function resolveAnnotation(id,artifactId){try{await api('/api/annotations/'+id+'/resolve',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});if(state.activeAnnotation===id)state.activeAnnotation=null;await showArtifact(artifactId,state.routeVersion)}catch(e){fail(e)}}
 function actionButtons(){return '<div class="feedback-actions">'+copyMenu()+'<button class="action-button" data-annotate>Annotate selection</button></div>'}
-async function showArtifact(uuid,version){const x=await api('/api/artifacts/'+encodeURIComponent(uuid));if(version!==state.routeVersion)return;const task=await getTask(x.artifact.task_uuid);if(version!==state.routeVersion)return;const name=x.artifact.name||state.fileNames.get(uuid)||fallbackName(x.artifact);const taskPath='#/tasks/'+task.task.uuid,typePath=taskPath+'/types/'+encodeURIComponent(x.artifact.type);crumbs([{label:'alx',path:''},{label:task.task.id,path:taskPath},{label:x.artifact.type,path:typePath},{label:name}]);renderTree();const annotationHtml=x.annotations.length?x.annotations.map(a=>'<section class="annotation"><div class="annotation-kind">'+esc(a.kind)+'</div>'+(a.selected_text?'<blockquote>'+esc(a.selected_text)+'</blockquote>':'')+(a.body?'<p>'+esc(a.body)+'</p>':'')+'<button class="resolve-button" data-resolve="'+esc(a.uuid)+'">Resolve</button></section>').join(''):'<p class="muted">No unresolved feedback.</p>';viewEl.innerHTML='<div class="reader-shell"><section class="document-pane"><div class="document-card">'+documentHeader(name,'Artifact · '+x.artifact.type,x.artifact.updated_at,x.artifact.body,actionButtons())+'<p class="selection-hint">Select text to open the annotation tools.</p><article id="rendered" class="markdown-body">'+x.rendered_html+'</article></div></section><aside class="annotations"><div class="annotations-head"><h2>Feedback</h2><span class="badge">'+x.annotations.length+'</span></div>'+annotationHtml+'</aside></div>';const rendered=viewEl.querySelector('#rendered');bindCopyMenu(x.artifact,artifactMetadata(x.artifact,task.task),artifactReadCommand(x.artifact));viewEl.querySelector('[data-annotate]').onclick=()=>openAnnotation(uuid);viewEl.querySelectorAll('[data-resolve]').forEach(b=>b.onclick=()=>resolveAnnotation(b.dataset.resolve,uuid));bindSelectionMenu(rendered,uuid);await renderMermaid(rendered)}
+async function showArtifact(uuid,version){const x=await api('/api/artifacts/'+encodeURIComponent(uuid));if(version!==state.routeVersion)return;const task=await getTask(x.artifact.task_uuid);if(version!==state.routeVersion)return;const name=x.artifact.name||state.fileNames.get(uuid)||fallbackName(x.artifact);const taskPath='#/tasks/'+task.task.uuid,typePath=taskPath+'/types/'+encodeURIComponent(x.artifact.type);crumbs([{label:'alx',path:''},{label:task.task.id,path:taskPath},{label:x.artifact.type,path:typePath},{label:name}]);renderTree();const annotationHtml=x.annotations.length?x.annotations.map(a=>'<section class="annotation kind-'+esc(a.kind)+'" data-annotation-card data-annotation-id="'+esc(a.uuid)+'" tabindex="0"><div class="annotation-kind">'+esc(a.kind)+'</div>'+(a.selected_text?'<blockquote>'+esc(a.selected_text)+'</blockquote>':'')+(a.body?'<p>'+esc(a.body)+'</p>':'')+'<button class="resolve-button" data-resolve="'+esc(a.uuid)+'" title="Remove annotation" aria-label="Remove annotation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg>Remove</button></section>').join(''):'<p class="muted">No unresolved feedback.</p>';viewEl.innerHTML='<div class="reader-shell"><section class="document-pane"><div class="document-card">'+documentHeader(name,'Artifact · '+x.artifact.type,x.artifact.updated_at,x.artifact.body,actionButtons())+'<p class="selection-hint">Select text to choose a feedback type.</p><article id="rendered" class="markdown-body">'+x.rendered_html+'</article></div></section><aside class="annotations"><div class="annotations-head"><h2>Feedback</h2><span class="badge">'+x.annotations.length+'</span></div>'+annotationHtml+'</aside></div>';const rendered=viewEl.querySelector('#rendered');bindCopyMenu(x.artifact,artifactMetadata(x.artifact,task.task),artifactReadCommand(x.artifact));viewEl.querySelector('[data-annotate]').onclick=()=>openAnnotation(uuid);viewEl.querySelectorAll('[data-resolve]').forEach(button=>button.onclick=event=>{event.stopPropagation();resolveAnnotation(button.dataset.resolve,uuid)});bindSelectionMenu(rendered,uuid);await renderMermaid(rendered);paintAnnotationHighlights(rendered,x.annotations);bindAnnotationInteractions(rendered)}
 async function route(){const version=++state.routeVersion;statusEl.textContent='';const parts=location.hash.replace(/^#\/?/,'').split('/').filter(Boolean);try{if(!parts.length){renderRoot();return}if(parts[0]==='archived'){renderArchivedRoot();return}if(parts[0]!=='tasks'||!parts[1]){setHash('');return}const x=await getTask(parts[1]);if(version!==state.routeVersion)return;if(parts.length===2){renderDirectory(x);return}if(parts[2]==='task.md'){renderTaskDocument(x);return}if(parts[2]==='types'&&parts[3]){renderArtifactDirectory(x,decodeURIComponent(parts[3]));return}if(parts[2]==='artifacts'&&parts[3]){await showArtifact(parts[3],version);return}setHash('#/tasks/'+parts[1])}catch(e){if(version===state.routeVersion)fail(e)}}
 async function start(){try{await reloadTaskLists();renderTree();await route()}catch(e){fail(e)}}
 filterEl.addEventListener('input',renderTree);
-window.addEventListener('hashchange',()=>{hideSelectionMenu();document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());route()});
+window.addEventListener('hashchange',()=>{hideSelectionMenu();state.activeAnnotation=null;document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());route()});
 window.addEventListener('scroll',hideSelectionMenu,true);
 window.addEventListener('resize',hideSelectionMenu);
 selectionMenuEl.addEventListener('mousedown',event=>event.preventDefault());
@@ -399,10 +433,14 @@ taskFormEl.addEventListener('submit',event=>{event.preventDefault();submitTask()
 taskEditFormEl.addEventListener('submit',event=>{event.preventDefault();submitTaskEdit()});
 artifactFormEl.addEventListener('submit',event=>{event.preventDefault();submitArtifact()});
 annotationFormEl.addEventListener('submit',event=>{event.preventDefault();submitAnnotation()});
+annotationDialogEl.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();annotationDialogEl.close()}});
+annotationDialogEl.addEventListener('close',()=>{clearDraftHighlights();state.pendingAnnotation=null;annotationDialogEl.classList.remove('annotation-anchored');annotationDialogEl.style.left='';annotationDialogEl.style.top=''});
+document.addEventListener('pointerdown',event=>{if(annotationDialogEl.open&&!annotationDialogEl.contains(event.target)&&!selectionMenuEl.contains(event.target))annotationDialogEl.close()});
+document.addEventListener('pointerup',()=>{const root=state.selectionRoot,uuid=state.selectionUuid;state.selectionRoot=null;state.selectionUuid=null;if(root?.isConnected&&uuid)setTimeout(()=>showSelectionMenu(root,uuid))});
+document.addEventListener('pointercancel',()=>{state.selectionRoot=null;state.selectionUuid=null});
 [[taskFormEl,taskBodyEl],[taskEditFormEl,taskEditBodyEl],[artifactFormEl,artifactBodyEl],[annotationFormEl,annotationNoteEl]].forEach(([form,editor])=>editor.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();form.requestSubmit()}}));
 document.querySelectorAll('[data-close-dialog]').forEach(button=>button.onclick=()=>button.closest('dialog').close());
 document.querySelector('#composer-close').onclick=()=>annotationDialogEl.close();
-document.querySelector('#composer-cancel').onclick=()=>annotationDialogEl.close();
 document.querySelectorAll('dialog').forEach(dialog=>dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()}));
 start();
 </script>

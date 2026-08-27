@@ -52,6 +52,17 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(response_body(&root).contains("artifactGroups"));
     assert!(response_body(&root).contains("'/types/'"));
     assert!(response_body(&root).contains("annotation-dialog"));
+    assert!(response_body(&root).contains("annotation-highlight"));
+    assert!(response_body(&root).contains("function paintAnnotationHighlights"));
+    assert!(response_body(&root).contains("function bindAnnotationInteractions"));
+    assert!(response_body(&root).contains("data-annotation-card"));
+    assert!(response_body(&root).contains("annotation-anchored"));
+    assert!(response_body(&root).contains("annotation-popover-head"));
+    assert!(response_body(&root).contains("annotationDialogEl.show()"));
+    assert!(response_body(&root).contains("focus({preventScroll:true})"));
+    assert!(response_body(&root).contains("limits.comparePoint"));
+    assert!(response_body(&root).contains("document.addEventListener('pointerup'"));
+    assert!(!response_body(&root).contains("kind-fieldset"));
     assert!(response_body(&root).contains("task-dialog"));
     assert!(response_body(&root).contains("task-edit-dialog"));
     assert!(response_body(&root).contains("data-edit-task"));
