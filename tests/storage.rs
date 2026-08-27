@@ -10,13 +10,121 @@ fn test_app() -> (TempDir, App) {
 #[test]
 fn migrates_and_supports_task_crud_and_lookup() {
     let (_directory, app) = test_app();
-    assert_eq!(app.migration_versions().unwrap(), vec![1, 2, 3]);
+    assert_eq!(app.migration_versions().unwrap(), vec![1, 2, 3, 4]);
 
     let task = app.create_task("ARE-1175", "Investigate search").unwrap();
     assert_eq!(app.read_task("ARE-1175").unwrap(), task);
     assert_eq!(app.read_task(&task.uuid).unwrap(), task);
     assert_eq!(app.list_tasks().unwrap(), vec![task.clone()]);
     assert_eq!(app.search_tasks("search").unwrap(), vec![task]);
+}
+
+#[test]
+fn completed_tasks_are_read_only_and_reopenable() {
+    let (_directory, app) = test_app();
+    let task = app.create_task("COMPLETE-1", "body").unwrap();
+    let artifact = app.create_artifact(&task.uuid, "notes", "text").unwrap();
+    let annotation = app
+        .create_annotation(
+            &artifact.uuid,
+            NewAnnotation {
+                kind: AnnotationKind::Comment,
+                start_offset: None,
+                end_offset: None,
+                selected_text: None,
+                body: Some("feedback".into()),
+            },
+        )
+        .unwrap();
+
+    app.complete_task("COMPLETE-1").unwrap();
+    app.complete_task(&task.uuid).unwrap();
+    assert!(app.list_tasks().unwrap().is_empty());
+    assert!(app.search_tasks("body").unwrap().is_empty());
+    let completed = app.list_completed_tasks().unwrap();
+    assert_eq!(completed.len(), 1);
+    assert!(completed[0].completed_at.is_some());
+    assert!(completed[0].archived_at.is_none());
+
+    assert!(app.update_task(&task.uuid, "changed").is_err());
+    assert!(app.create_artifact(&task.uuid, "more", "blocked").is_err());
+    assert!(app.update_artifact(&artifact.uuid, "changed").is_err());
+    assert!(app.rename_artifact(&artifact.uuid, "changed.md").is_err());
+    assert!(
+        app.create_annotation(
+            &artifact.uuid,
+            NewAnnotation {
+                kind: AnnotationKind::Good,
+                start_offset: None,
+                end_offset: None,
+                selected_text: None,
+                body: None,
+            },
+        )
+        .is_err()
+    );
+    assert!(app.resolve_annotation(&annotation.uuid).is_err());
+
+    app.reopen_task("COMPLETE-1").unwrap();
+    app.reopen_task(&task.uuid).unwrap();
+    assert!(app.list_completed_tasks().unwrap().is_empty());
+    assert_eq!(app.list_tasks().unwrap().len(), 1);
+    app.update_task(&task.uuid, "changed").unwrap();
+    app.update_artifact(&artifact.uuid, "changed").unwrap();
+    app.resolve_annotation(&annotation.uuid).unwrap();
+
+    app.complete_task(&task.uuid).unwrap();
+    app.archive_task(&task.uuid).unwrap();
+    assert!(app.list_completed_tasks().unwrap().is_empty());
+    assert_eq!(app.list_archived_tasks().unwrap().len(), 1);
+    assert!(app.reopen_task(&task.uuid).is_err());
+}
+
+#[test]
+fn completion_is_atomic_with_content_writes() {
+    use std::sync::{Arc, Barrier};
+
+    let (_directory, app) = test_app();
+    for index in 0..64 {
+        let task = app.create_task(&format!("RACE-{index}"), "before").unwrap();
+        let artifact = app.create_artifact(&task.uuid, "notes", "before").unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let task_writer = {
+            let app = app.clone();
+            let task_uuid = task.uuid.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _ = app.update_task(&task_uuid, "after");
+            })
+        };
+        let artifact_writer = {
+            let app = app.clone();
+            let artifact_uuid = artifact.uuid.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _ = app.update_artifact(&artifact_uuid, "after");
+            })
+        };
+
+        barrier.wait();
+        app.complete_task(&task.uuid).unwrap();
+        let task_body_at_completion = app.read_task(&task.uuid).unwrap().body;
+        let artifact_body_at_completion = app.read_artifact(&artifact.uuid).unwrap().body;
+        task_writer.join().unwrap();
+        artifact_writer.join().unwrap();
+
+        assert_eq!(
+            app.read_task(&task.uuid).unwrap().body,
+            task_body_at_completion
+        );
+        assert_eq!(
+            app.read_artifact(&artifact.uuid).unwrap().body,
+            artifact_body_at_completion
+        );
+    }
 }
 
 #[test]
@@ -141,8 +249,9 @@ fn migrates_existing_tasks_and_artifacts_with_nullable_metadata() {
     drop(connection);
 
     let app = App::new(&database_path).unwrap();
-    assert_eq!(app.migration_versions().unwrap(), vec![1, 2, 3]);
+    assert_eq!(app.migration_versions().unwrap(), vec![1, 2, 3, 4]);
     assert_eq!(app.read_task("OLD-1").unwrap().archived_at, None);
+    assert_eq!(app.read_task("OLD-1").unwrap().completed_at, None);
     let artifact = app
         .read_artifact("01900000-0000-7000-8000-000000000002")
         .unwrap();

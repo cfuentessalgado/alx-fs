@@ -35,6 +35,9 @@ Revised canonical task statement.
 EOF
 alx task list
 alx task list --json
+alx task complete ARE-1175
+alx task list --completed
+alx task reopen ARE-1175
 alx task archive ARE-1175
 alx task list --archived
 alx task delete ARE-1175 --confirm
@@ -43,7 +46,7 @@ alx task search meilisearch --json
 alx task context ARE-1175
 ```
 
-`task create` prints only the new UUID. Task IDs must not conflict with any existing task UUID. `task read` prints only the stored body. UUID inputs accept equivalent UUID text forms, such as uppercase UUIDs. `task update` replaces the stored body from stdin and refreshes `updated_at`. It has no stdout on success and keeps the task UUID and id. Archive has no stdout and removes the task from the default list and search results. Use `task list --archived` to list archived tasks. Delete permanently removes the task, its artifacts, and its annotations. It requires `--confirm` and has no stdout. Plain `task list` and `task search` print one tab-separated record per line with these columns:
+`task create` prints only the new UUID. Task IDs must not conflict with any existing task UUID. `task read` prints only the stored body. UUID inputs accept equivalent UUID text forms, such as uppercase UUIDs. `task update` replaces the stored body from stdin and refreshes `updated_at`. It has no stdout on success and keeps the task UUID and id. Complete has no stdout and moves an active task to the read-only completed list. Completed and archived tasks cannot be edited, receive artifacts, or change annotations. Use `task list --completed` to list completed tasks and `task reopen` to make one active again. Archive has no stdout and moves an active or completed task to the archived list. Use `task list --archived` to list archived tasks. Delete permanently removes the task, its artifacts, and its annotations. It requires `--confirm` and has no stdout. Plain `task list` and `task search` print one tab-separated record per line with these columns:
 
 ```text
 uuid<TAB>id<TAB>updated_at
@@ -113,7 +116,7 @@ alx dump --zip ./export.zip
 alx dump ARE-1175 --zip ./export.zip
 ```
 
-`dump` writes a readable file tree for handoff or backup. Each task gets `TARGET/<task id>/task.md` and one file per artifact under `TARGET/<task id>/<artifact type>/<artifact name>`. The last argument is always the target path; an optional task key before it limits the dump to that task. Without a task key, all tasks are dumped, including archived ones. Annotations are not exported. Dump has no stdout and does not modify the database. Existing files at the target are overwritten.
+`dump` writes a readable file tree for handoff or backup. Each task gets `TARGET/<task id>/task.md` and one file per artifact under `TARGET/<task id>/<artifact type>/<artifact name>`. The last argument is always the target path; an optional task key before it limits the dump to that task. Without a task key, all active, completed, and archived tasks are dumped. Annotations are not exported. Dump has no stdout and does not modify the database. Existing files at the target are overwritten.
 
 Ids and names that are unsafe as path components have unsafe characters replaced with `_`, and duplicate names in the same folder get a `--<UUID prefix>` suffix. `--zip` writes one zip archive at the target path instead of a directory tree.
 
@@ -127,9 +130,9 @@ alx serve --tailscale
 
 The default is `127.0.0.1:3000`. `--bind` accepts an explicit `IP:PORT`. Port `0` asks the operating system to select a free port; the listening message shows the selected port. `--tailscale` runs `tailscale ip -4` and binds the first valid IPv4 address on port 3000. The options conflict.
 
-Remote binding has no user authentication in v1. Anyone who can reach the selected IP and port can create and read stored content, update task bodies, manage annotations, archive tasks, and permanently delete tasks. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
+Remote binding has no user authentication in v1. Anyone who can reach the selected IP and port can create and read stored content, update task bodies, manage annotations, complete, reopen, and archive tasks, and permanently delete tasks. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
 
-The embedded UI browses active and archived tasks and artifacts in type folders. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task and artifact views have a **Copy** menu. It copies the raw Markdown body, JSON metadata with the matching CLI read command, or only the read command. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, opens feedback actions beside selected text, keeps saved selections highlighted, links each highlight to its feedback card, and resolves annotations. Mermaid fenced code blocks are rendered with Mermaid 11 loaded from jsDelivr. That CDN request is the only external network request the UI makes, so the UI is not fully offline; if the CDN is unreachable, the diagram source stays visible. Rendered Markdown cannot load images or other remote resources. Editing task bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
+The embedded UI shows active tasks under the `alx` root. `Completed` and `Archived` are separate root folders. Root, task, and artifact type folders can be expanded and collapsed. Completed tasks are read-only and have **Reopen** and **Archive** actions. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task and artifact views have a **Copy** menu. It copies the raw Markdown body, JSON metadata with the matching CLI read command, or only the read command. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, opens feedback actions beside selected text, keeps saved selections highlighted, links each highlight to its feedback card, and resolves annotations. Mermaid fenced code blocks are rendered with Mermaid 11, and code blocks use highlight.js for syntax highlighting. Both libraries and the highlight.js themes are loaded from jsDelivr, so the UI is not fully offline. If the CDN is unreachable, diagram source stays visible and code blocks remain readable without syntax highlighting. Rendered Markdown cannot load images or other remote resources. Editing task bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
 
 ## Pipeline behavior
 

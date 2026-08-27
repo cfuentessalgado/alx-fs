@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     error::Error as StdError,
     fmt, fs,
@@ -27,10 +28,7 @@ use pulldown_cmark::{Options, Parser, html};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zip::{
-    CompressionMethod, ZipWriter,
-    write::SimpleFileOptions,
-};
+use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 const SCHEMA: &str = include_str!("schema.sql");
 const INDEX_HTML: &str = include_str!("web/index.html");
@@ -49,6 +47,7 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub archived_at: Option<String>,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -231,8 +230,7 @@ impl App {
     fn migrate(&self) -> Result<()> {
         let mut connection = self.connect()?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
-        let transaction =
-            connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(SCHEMA)?;
         transaction.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
@@ -264,6 +262,20 @@ impl App {
         }
         transaction.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
+            [now()],
+        )?;
+        let has_task_completed_at: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'completed_at'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_task_completed_at {
+            transaction.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT", [])?;
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?1)",
             [now()],
         )?;
         transaction.commit()?;
@@ -322,6 +334,7 @@ impl App {
             created_at: timestamp.clone(),
             updated_at: timestamp,
             archived_at: None,
+            completed_at: None,
         };
         transaction
             .execute(
@@ -338,7 +351,7 @@ impl App {
         let connection = self.connect()?;
         let by_id = connection
             .query_row(
-                "SELECT uuid, id, body, created_at, updated_at, archived_at FROM tasks WHERE id = ?1",
+                "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks WHERE id = ?1",
                 [key],
                 task_from_row,
             )
@@ -346,7 +359,7 @@ impl App {
         let by_uuid = match normalized_uuid(key) {
             Some(uuid) => connection
                 .query_row(
-                    "SELECT uuid, id, body, created_at, updated_at, archived_at FROM tasks WHERE uuid = ?1",
+                    "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks WHERE uuid = ?1",
                     [uuid],
                     task_from_row,
                 )
@@ -363,21 +376,25 @@ impl App {
     }
 
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
-        self.list_tasks_by_archive_status(false)
+        self.list_tasks_with_condition("archived_at IS NULL AND completed_at IS NULL")
+    }
+
+    pub fn list_completed_tasks(&self) -> Result<Vec<Task>> {
+        self.list_tasks_with_condition("archived_at IS NULL AND completed_at IS NOT NULL")
     }
 
     pub fn list_archived_tasks(&self) -> Result<Vec<Task>> {
-        self.list_tasks_by_archive_status(true)
+        self.list_tasks_with_condition("archived_at IS NOT NULL")
     }
 
-    fn list_tasks_by_archive_status(&self, archived: bool) -> Result<Vec<Task>> {
+    fn list_tasks_with_condition(&self, condition: &str) -> Result<Vec<Task>> {
         let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT uuid, id, body, created_at, updated_at, archived_at FROM tasks
-             WHERE (?1 AND archived_at IS NOT NULL) OR (NOT ?1 AND archived_at IS NULL)
-             ORDER BY created_at, uuid",
-        )?;
-        let rows = statement.query_map([archived], task_from_row)?;
+        let sql = format!(
+            "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at
+             FROM tasks WHERE {condition} ORDER BY created_at, uuid"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map([], task_from_row)?;
         collect_rows(rows)
     }
 
@@ -386,8 +403,8 @@ impl App {
         let pattern = format!("%{query}%");
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT uuid, id, body, created_at, updated_at, archived_at FROM tasks
-             WHERE archived_at IS NULL AND (id LIKE ?1 OR body LIKE ?1)
+            "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks
+             WHERE archived_at IS NULL AND completed_at IS NULL AND (id LIKE ?1 OR body LIKE ?1)
              ORDER BY updated_at DESC, uuid",
         )?;
         let rows = statement.query_map([pattern], task_from_row)?;
@@ -396,12 +413,73 @@ impl App {
 
     pub fn update_task(&self, key: &str, body: &str) -> Result<()> {
         let task = self.read_task(key)?;
+        ensure_task_writable(&task)?;
         let changed = self.connect()?.execute(
-            "UPDATE tasks SET body = ?2, updated_at = ?3 WHERE uuid = ?1",
+            "UPDATE tasks SET body = ?2, updated_at = ?3
+             WHERE uuid = ?1 AND archived_at IS NULL AND completed_at IS NULL",
             params![task.uuid, body, now()],
         )?;
         if changed == 0 {
+            ensure_task_writable(&self.read_task(&task.uuid)?)?;
             return Err(not_found(format!("task not found: {key}")));
+        }
+        Ok(())
+    }
+
+    pub fn complete_task(&self, key: &str) -> Result<()> {
+        let task = self.read_task(key)?;
+        if task.archived_at.is_some() {
+            return Err(invalid(format!(
+                "archived task cannot be completed: {}",
+                task.id
+            )));
+        }
+        if task.completed_at.is_some() {
+            return Ok(());
+        }
+        let timestamp = now();
+        let changed = self.connect()?.execute(
+            "UPDATE tasks SET completed_at = ?2, updated_at = ?2
+             WHERE uuid = ?1 AND archived_at IS NULL AND completed_at IS NULL",
+            params![task.uuid, timestamp],
+        )?;
+        if changed == 0 {
+            let current = self.read_task(&task.uuid)?;
+            if current.archived_at.is_some() {
+                return Err(invalid(format!(
+                    "archived task cannot be completed: {}",
+                    current.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn reopen_task(&self, key: &str) -> Result<()> {
+        let task = self.read_task(key)?;
+        if task.archived_at.is_some() {
+            return Err(invalid(format!(
+                "archived task cannot be reopened: {}",
+                task.id
+            )));
+        }
+        if task.completed_at.is_none() {
+            return Ok(());
+        }
+        let timestamp = now();
+        let changed = self.connect()?.execute(
+            "UPDATE tasks SET completed_at = NULL, updated_at = ?2
+             WHERE uuid = ?1 AND archived_at IS NULL AND completed_at IS NOT NULL",
+            params![task.uuid, timestamp],
+        )?;
+        if changed == 0 {
+            let current = self.read_task(&task.uuid)?;
+            if current.archived_at.is_some() {
+                return Err(invalid(format!(
+                    "archived task cannot be reopened: {}",
+                    current.id
+                )));
+            }
         }
         Ok(())
     }
@@ -454,6 +532,7 @@ impl App {
             validate_non_empty("artifact name", name)?;
         }
         let task = self.read_task(task_key)?;
+        ensure_task_writable(&task)?;
         let timestamp = now();
         let uuid = new_uuid();
         let name = name
@@ -468,9 +547,13 @@ impl App {
             created_at: timestamp.clone(),
             updated_at: timestamp,
         };
-        self.connect()?.execute(
+        let changed = self.connect()?.execute(
             "INSERT INTO artifacts(uuid, task_uuid, type, name, body, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+             WHERE EXISTS(
+                 SELECT 1 FROM tasks
+                 WHERE uuid = ?2 AND archived_at IS NULL AND completed_at IS NULL
+             )",
             params![
                 artifact.uuid,
                 artifact.task_uuid,
@@ -481,6 +564,10 @@ impl App {
                 artifact.updated_at
             ],
         )?;
+        if changed == 0 {
+            ensure_task_writable(&self.read_task(&artifact.task_uuid)?)?;
+            return Err(invalid("task state changed while creating artifact"));
+        }
         Ok(artifact)
     }
 
@@ -498,25 +585,41 @@ impl App {
     }
 
     pub fn update_artifact(&self, uuid: &str, body: &str) -> Result<()> {
-        let normalized = require_uuid(uuid)?;
+        let artifact = self.read_artifact(uuid)?;
+        ensure_task_writable(&self.read_task(&artifact.task_uuid)?)?;
         let changed = self.connect()?.execute(
-            "UPDATE artifacts SET body = ?2, updated_at = ?3 WHERE uuid = ?1",
-            params![normalized, body, now()],
+            "UPDATE artifacts SET body = ?2, updated_at = ?3
+             WHERE uuid = ?1 AND EXISTS(
+                 SELECT 1 FROM tasks
+                 WHERE tasks.uuid = artifacts.task_uuid
+                   AND archived_at IS NULL AND completed_at IS NULL
+             )",
+            params![artifact.uuid, body, now()],
         )?;
         if changed == 0 {
+            let current = self.read_artifact(&artifact.uuid)?;
+            ensure_task_writable(&self.read_task(&current.task_uuid)?)?;
             return Err(not_found(format!("artifact not found: {uuid}")));
         }
         Ok(())
     }
 
     pub fn rename_artifact(&self, uuid: &str, name: &str) -> Result<()> {
-        let normalized = require_uuid(uuid)?;
+        let artifact = self.read_artifact(uuid)?;
+        ensure_task_writable(&self.read_task(&artifact.task_uuid)?)?;
         validate_non_empty("artifact name", name)?;
         let changed = self.connect()?.execute(
-            "UPDATE artifacts SET name = ?2, updated_at = ?3 WHERE uuid = ?1",
-            params![normalized, name, now()],
+            "UPDATE artifacts SET name = ?2, updated_at = ?3
+             WHERE uuid = ?1 AND EXISTS(
+                 SELECT 1 FROM tasks
+                 WHERE tasks.uuid = artifacts.task_uuid
+                   AND archived_at IS NULL AND completed_at IS NULL
+             )",
+            params![artifact.uuid, name, now()],
         )?;
         if changed == 0 {
+            let current = self.read_artifact(&artifact.uuid)?;
+            ensure_task_writable(&self.read_task(&current.task_uuid)?)?;
             return Err(not_found(format!("artifact not found: {uuid}")));
         }
         Ok(())
@@ -548,6 +651,7 @@ impl App {
         input: NewAnnotation,
     ) -> Result<Annotation> {
         let artifact = self.read_artifact(artifact_uuid)?;
+        ensure_task_writable(&self.read_task(&artifact.task_uuid)?)?;
         validate_offsets(input.start_offset, input.end_offset)?;
         let annotation = Annotation {
             uuid: new_uuid(),
@@ -560,11 +664,18 @@ impl App {
             created_at: now(),
             resolved_at: None,
         };
-        self.connect()?.execute(
+        let changed = self.connect()?.execute(
             "INSERT INTO annotations(
                 uuid, artifact_uuid, kind, start_offset, end_offset, selected_text, body,
                 created_at, resolved_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+             )
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL
+             WHERE EXISTS(
+                 SELECT 1 FROM artifacts
+                 JOIN tasks ON tasks.uuid = artifacts.task_uuid
+                 WHERE artifacts.uuid = ?2
+                   AND tasks.archived_at IS NULL AND tasks.completed_at IS NULL
+             )",
             params![
                 annotation.uuid,
                 annotation.artifact_uuid,
@@ -576,6 +687,11 @@ impl App {
                 annotation.created_at
             ],
         )?;
+        if changed == 0 {
+            let current = self.read_artifact(&annotation.artifact_uuid)?;
+            ensure_task_writable(&self.read_task(&current.task_uuid)?)?;
+            return Err(invalid("task state changed while creating annotation"));
+        }
         Ok(annotation)
     }
 
@@ -602,11 +718,40 @@ impl App {
 
     pub fn resolve_annotation(&self, uuid: &str) -> Result<()> {
         let normalized = require_uuid(uuid)?;
-        let changed = self.connect()?.execute(
-            "UPDATE annotations SET resolved_at = COALESCE(resolved_at, ?2) WHERE uuid = ?1",
+        let connection = self.connect()?;
+        let task_uuid = connection
+            .query_row(
+                "SELECT artifacts.task_uuid FROM annotations
+                 JOIN artifacts ON artifacts.uuid = annotations.artifact_uuid
+                 WHERE annotations.uuid = ?1",
+                [&normalized],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found(format!("annotation not found: {uuid}")))?;
+        ensure_task_writable(&self.read_task(&task_uuid)?)?;
+        let changed = connection.execute(
+            "UPDATE annotations SET resolved_at = COALESCE(resolved_at, ?2)
+             WHERE uuid = ?1 AND EXISTS(
+                 SELECT 1 FROM artifacts
+                 JOIN tasks ON tasks.uuid = artifacts.task_uuid
+                 WHERE artifacts.uuid = annotations.artifact_uuid
+                   AND tasks.archived_at IS NULL AND tasks.completed_at IS NULL
+             )",
             params![normalized, now()],
         )?;
         if changed == 0 {
+            let current_task_uuid = connection
+                .query_row(
+                    "SELECT artifacts.task_uuid FROM annotations
+                     JOIN artifacts ON artifacts.uuid = annotations.artifact_uuid
+                     WHERE annotations.uuid = ?1",
+                    [&normalized],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| not_found(format!("annotation not found: {uuid}")))?;
+            ensure_task_writable(&self.read_task(&current_task_uuid)?)?;
             return Err(not_found(format!("annotation not found: {uuid}")));
         }
         Ok(())
@@ -688,6 +833,7 @@ impl App {
             Some(key) => vec![self.read_task(key)?],
             None => {
                 let mut tasks = self.list_tasks()?;
+                tasks.extend(self.list_completed_tasks()?);
                 tasks.extend(self.list_archived_tasks()?);
                 tasks
             }
@@ -802,11 +948,14 @@ pub fn router(app: App) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/tasks", get(api_tasks).post(api_create_task))
+        .route("/api/completed-tasks", get(api_completed_tasks))
         .route("/api/archived-tasks", get(api_archived_tasks))
         .route(
             "/api/tasks/{key}",
             get(api_task).put(api_update_task).delete(api_delete_task),
         )
+        .route("/api/tasks/{key}/complete", post(api_complete_task))
+        .route("/api/tasks/{key}/reopen", post(api_reopen_task))
         .route("/api/tasks/{key}/archive", post(api_archive_task))
         .route("/api/tasks/{key}/artifacts", post(api_create_artifact))
         .route("/api/artifacts/{uuid}", get(api_artifact))
@@ -836,7 +985,7 @@ async fn index() -> impl IntoResponse {
     (
         [(
             header::CONTENT_SECURITY_POLICY,
-            "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; img-src 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'",
+            "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; img-src 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://cdn.jsdelivr.net",
         )],
         Html(INDEX_HTML),
     )
@@ -908,6 +1057,10 @@ async fn api_create_task(
     Ok((StatusCode::CREATED, Json(task)))
 }
 
+async fn api_completed_tasks(State(app): State<App>) -> ApiResult<Json<Vec<Task>>> {
+    Ok(Json(app.list_completed_tasks()?))
+}
+
 async fn api_archived_tasks(State(app): State<App>) -> ApiResult<Json<Vec<Task>>> {
     Ok(Json(app.list_archived_tasks()?))
 }
@@ -942,6 +1095,24 @@ async fn api_update_task(
     Json(input): Json<TaskUpdateInput>,
 ) -> ApiResult<StatusCode> {
     app.update_task(&key, &input.body)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_complete_task(
+    State(app): State<App>,
+    AxumPath(key): AxumPath<String>,
+    Json(_body): Json<serde_json::Value>,
+) -> ApiResult<StatusCode> {
+    app.complete_task(&key)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_reopen_task(
+    State(app): State<App>,
+    AxumPath(key): AxumPath<String>,
+    Json(_body): Json<serde_json::Value>,
+) -> ApiResult<StatusCode> {
+    app.reopen_task(&key)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1026,7 +1197,21 @@ pub fn render_markdown(markdown: &str) -> String {
     html::push_html(&mut unsafe_html, parser);
     ammonia::Builder::default()
         .rm_tags(&["img"])
-        .add_allowed_classes("code", &["language-mermaid"])
+        .add_tag_attributes("code", &["class"])
+        .attribute_filter(|element, attribute, value| {
+            if element == "code" && attribute == "class" {
+                let languages: Vec<&str> = value
+                    .split_ascii_whitespace()
+                    .filter(|class| class.starts_with("language-"))
+                    .collect();
+                return if languages.is_empty() {
+                    None
+                } else {
+                    Some(Cow::Owned(languages.join(" ")))
+                };
+            }
+            Some(Cow::Borrowed(value))
+        })
         .clean(&unsafe_html)
         .to_string()
 }
@@ -1092,11 +1277,13 @@ fn write_directory(target: &Path, files: &[(String, String)]) -> Result<()> {
 }
 
 fn write_zip(target: &Path, files: &[(String, String)]) -> Result<()> {
-    if let Some(parent) = target.parent() && !parent.as_os_str().is_empty() {
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty()
+    {
         fs::create_dir_all(parent)?;
     }
-    let file =
-        fs::File::create(target).with_context(|| format!("failed to create {}", target.display()))?;
+    let file = fs::File::create(target)
+        .with_context(|| format!("failed to create {}", target.display()))?;
     let mut writer = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (path, contents) in files {
@@ -1180,6 +1367,16 @@ fn require_uuid(value: &str) -> Result<String> {
     normalized_uuid(value).ok_or_else(|| invalid(format!("invalid UUID: {value}")))
 }
 
+fn ensure_task_writable(task: &Task) -> Result<()> {
+    if task.archived_at.is_some() {
+        return Err(invalid(format!("archived task is read-only: {}", task.id)));
+    }
+    if task.completed_at.is_some() {
+        return Err(invalid(format!("completed task is read-only: {}", task.id)));
+    }
+    Ok(())
+}
+
 fn validate_non_empty(name: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(invalid(format!("{name} must not be empty")));
@@ -1223,6 +1420,7 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
         archived_at: row.get(5)?,
+        completed_at: row.get(6)?,
     })
 }
 
@@ -1289,6 +1487,25 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&path, permissions).unwrap();
         (directory, path)
+    }
+
+    #[test]
+    fn render_markdown_keeps_language_classes_on_code_blocks() {
+        let html = render_markdown(
+            "```rust\nfn main() {}\n```\n\n```mermaid\ngraph TD\n```\n\n```\nplain\n```",
+        );
+        assert!(html.contains("<code class=\"language-rust\">"));
+        assert!(html.contains("<code class=\"language-mermaid\">"));
+        assert!(html.contains("<code>plain\n</code>"));
+    }
+
+    #[test]
+    fn render_markdown_strips_foreign_classes_on_code_blocks() {
+        let html = render_markdown(
+            "<code class=\"language-rust evil\">x</code><span class=\"evil\">y</span>",
+        );
+        assert!(html.contains("<code class=\"language-rust\">x</code>"));
+        assert!(!html.contains("evil"));
     }
 
     #[test]

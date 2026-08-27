@@ -69,7 +69,7 @@ fn dump_writes_a_file_tree_with_task_and_artifact_files() {
 }
 
 #[test]
-fn dump_with_task_key_limits_output_and_includes_archived_tasks_by_default() {
+fn dump_with_task_key_limits_output_and_includes_inactive_tasks_by_default() {
     let directory = tempfile::tempdir().unwrap();
     create_task(&directory);
     create_artifact(&directory);
@@ -80,6 +80,15 @@ fn dump_with_task_key_limits_output_and_includes_archived_tasks_by_default() {
     );
     command(&directory)
         .args(["task", "archive", "ARE-2"])
+        .assert()
+        .success();
+    stdout(
+        command(&directory)
+            .args(["task", "create", "ARE-3"])
+            .write_stdin("Completed task\n"),
+    );
+    command(&directory)
+        .args(["task", "complete", "ARE-3"])
         .assert()
         .success();
 
@@ -100,9 +109,14 @@ fn dump_with_task_key_limits_output_and_includes_archived_tasks_by_default() {
         .success();
     assert!(all_target.join("ARE-1175/task.md").is_file());
     assert!(all_target.join("ARE-2/task.md").is_file());
+    assert!(all_target.join("ARE-3/task.md").is_file());
 
     command(&directory)
-        .args(["dump", "missing", all.path().join("export2").to_str().unwrap()])
+        .args([
+            "dump",
+            "missing",
+            all.path().join("export2").to_str().unwrap(),
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("task not found"));
@@ -151,8 +165,7 @@ fn dump_suffixes_duplicate_artifact_names_and_sanitizes_unsafe_components() {
         "first"
     );
     assert_eq!(
-        std::fs::read_to_string(folder.join(format!("findings--{}.md", &second[..8])))
-            .unwrap(),
+        std::fs::read_to_string(folder.join(format!("findings--{}.md", &second[..8]))).unwrap(),
         "second"
     );
 }
@@ -268,6 +281,49 @@ fn create_read_list_search_and_context_stdout_contracts() {
     assert_eq!(
         stdout(command(&directory).args(["task", "context", "ARE-1175"])),
         expected_context
+    );
+}
+
+#[test]
+fn task_complete_list_and_reopen_manage_the_completed_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let task_uuid = create_task(&directory);
+
+    command(&directory)
+        .args(["task", "complete", "ARE-1175"])
+        .assert()
+        .success()
+        .stdout("");
+    command(&directory)
+        .args(["task", "list"])
+        .assert()
+        .success()
+        .stdout("");
+    let completed: Vec<Task> = serde_json::from_str(&stdout(command(&directory).args([
+        "task",
+        "list",
+        "--completed",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(completed[0].uuid, task_uuid);
+    assert!(completed[0].completed_at.is_some());
+
+    command(&directory)
+        .args(["task", "update", "ARE-1175"])
+        .write_stdin("blocked")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("read-only"));
+
+    command(&directory)
+        .args(["task", "reopen", "ARE-1175"])
+        .assert()
+        .success()
+        .stdout("");
+    assert!(
+        stdout(command(&directory).args(["task", "list"]))
+            .starts_with(&format!("{task_uuid}\tARE-1175\t"))
     );
 }
 

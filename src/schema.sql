@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     body TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    archived_at TEXT
+    archived_at TEXT,
+    completed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (

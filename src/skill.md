@@ -31,7 +31,15 @@ alx task update TASK_ID_OR_UUID < REVISED_FILE
 
 Update has no stdout on success. The task UUID and id stay the same.
 
-Archive a completed task only when requested:
+Complete a task only when requested. Completed tasks are read-only until reopened:
+
+```bash
+alx task complete TASK_ID_OR_UUID
+alx task list --completed
+alx task reopen TASK_ID_OR_UUID
+```
+
+Archive an active or completed task only when requested:
 
 ```bash
 alx task archive TASK_ID_OR_UUID
@@ -97,7 +105,7 @@ alx dump ./export
 alx dump ARE-1175 ./export
 ```
 
-The last argument is always the target path; an optional task key before it limits the dump to that task. Without a task key, all tasks are dumped, including archived ones. Each task gets `TARGET/<task id>/task.md` and one file per artifact under `TARGET/<task id>/<type>/<artifact name>`. Annotations are not exported. Add `--zip` to write one zip archive at the target path instead of a directory tree:
+The last argument is always the target path; an optional task key before it limits the dump to that task. Without a task key, all active, completed, and archived tasks are dumped. Each task gets `TARGET/<task id>/task.md` and one file per artifact under `TARGET/<task id>/<type>/<artifact name>`. Annotations are not exported. Add `--zip` to write one zip archive at the target path instead of a directory tree:
 
 ```bash
 alx dump --zip ./export.zip

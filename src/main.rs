@@ -46,8 +46,16 @@ enum TaskCommand {
     List {
         #[arg(long)]
         json: bool,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "completed")]
         archived: bool,
+        #[arg(long, conflicts_with = "archived")]
+        completed: bool,
+    },
+    Complete {
+        id_or_uuid: String,
+    },
+    Reopen {
+        id_or_uuid: String,
     },
     Archive {
         id_or_uuid: String,
@@ -204,9 +212,15 @@ fn run_task(app: &App, command: TaskCommand) -> Result<()> {
                 }
             }
         }
-        TaskCommand::List { json, archived } => {
+        TaskCommand::List {
+            json,
+            archived,
+            completed,
+        } => {
             let tasks = if archived {
                 app.list_archived_tasks()?
+            } else if completed {
+                app.list_completed_tasks()?
             } else {
                 app.list_tasks()?
             };
@@ -223,6 +237,8 @@ fn run_task(app: &App, command: TaskCommand) -> Result<()> {
                 }
             }
         }
+        TaskCommand::Complete { id_or_uuid } => app.complete_task(&id_or_uuid)?,
+        TaskCommand::Reopen { id_or_uuid } => app.reopen_task(&id_or_uuid)?,
         TaskCommand::Archive { id_or_uuid } => app.archive_task(&id_or_uuid)?,
         TaskCommand::Delete {
             id_or_uuid,

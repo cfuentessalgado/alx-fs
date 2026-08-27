@@ -47,6 +47,23 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(root.starts_with("HTTP/1.1 200"), "{root:?}");
     assert!(response_body(&root).contains("function selectionOffsets"));
     assert!(response_body(&root).contains("Artifact Explorer"));
+    assert!(response_body(&root).contains(".tree-row.depth-1 { padding-left: 31px; }"));
+    assert!(response_body(&root).contains(".tree-row.depth-2 { padding-left: 52px; }"));
+    assert!(response_body(&root).contains(".tree-row.depth-3 { padding-left: 73px; }"));
+    assert!(response_body(&root).contains("row.className='tree-row depth-1'"));
+    assert!(response_body(&root).contains("root.className='tree-row'"));
+    assert!(response_body(&root).contains("appendTaskRoot('Completed','#/completed'"));
+    assert!(response_body(&root).contains("appendTaskRoot('Archived','#/archived'"));
+    assert!(response_body(&root).contains("taskFile.className='tree-row depth-2'"));
+    assert!(response_body(&root).contains("child.className='tree-row depth-3'"));
+    assert!(response_body(&root).contains("expandedTasks:new Set()"));
+    assert!(response_body(&root).contains("row.onclick=()=>{if(selected)toggleExpanded"));
+    assert!(response_body(&root).contains("folder.onclick=()=>{toggleExpanded"));
+    assert!(response_body(&root).contains("root.onclick=()=>{toggleExpanded"));
+    assert!(response_body(&root).contains("setAttribute('aria-expanded'"));
+    assert!(response_body(&root).contains("function bindDirectoryRows"));
+    assert!(response_body(&root).contains("row.setAttribute('role','link')"));
+    assert!(response_body(&root).contains("event.key==='Enter'||event.key===' '"));
     assert!(response_body(&root).contains("task.md"));
     assert!(response_body(&root).contains("a.name||fallbackName(a)"));
     assert!(response_body(&root).contains("artifactGroups"));
@@ -78,11 +95,15 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(response_body(&root).contains("function artifactMetadata"));
     assert!(response_body(&root).contains("alx task read "));
     assert!(response_body(&root).contains("alx artifact read "));
+    assert!(response_body(&root).contains("data-complete-task"));
+    assert!(response_body(&root).contains("data-reopen-task"));
     assert!(response_body(&root).contains("data-archive-task"));
     assert!(response_body(&root).contains("data-delete-task"));
     assert!(response_body(&root).contains("window.confirm"));
     assert!(response_body(&root).contains("mermaid@11.12.3"));
     assert!(root.contains("content-security-policy:"));
+    assert!(root
+        .contains("script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://cdn.jsdelivr.net"));
 
     let task_response = raw_http(
         address,
@@ -141,7 +162,7 @@ async fn http_routes_share_storage_and_sanitize_markdown() {
         .create_artifact(
             &task.uuid,
             "design",
-            "# Safe\n<script>alert(1)</script>\n[bad](javascript:alert(1))\n![tracker](https://example.invalid/pixel)\n\n```mermaid\ngraph TD\n  A --> B\n```",
+            "# Safe\n<script>alert(1)</script>\n[bad](javascript:alert(1))\n![tracker](https://example.invalid/pixel)\n\n```mermaid\ngraph TD\n  A --> B\n```\n\n```rust\nfn main() {}\n```",
         )
         .unwrap();
     let service = router(app.clone());
@@ -175,6 +196,8 @@ async fn http_routes_share_storage_and_sanitize_markdown() {
     assert!(!html.contains("<img"));
     assert!(!html.contains("example.invalid"));
     assert!(html.contains("class=\"language-mermaid\""));
+    assert!(html.contains("class=\"language-rust\""));
+    assert!(html.contains("fn main()"));
     assert!(html.contains("graph TD"));
 
     let response = service
@@ -344,6 +367,79 @@ async fn http_updates_task_bodies_and_reports_missing_tasks() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn http_completes_and_reopens_read_only_tasks() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    let task = app.create_task("WEB-COMPLETE", "Body").unwrap();
+    let service = router(app.clone());
+
+    let completed = service
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{}/complete", task.uuid))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::NO_CONTENT);
+
+    let list = service
+        .clone()
+        .oneshot(
+            Request::get("/api/completed-tasks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+    let tasks: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(tasks[0]["uuid"], task.uuid);
+    assert!(tasks[0]["completed_at"].is_string());
+
+    let edit = service
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/tasks/{}", task.uuid))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"body": "Changed"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edit.status(), StatusCode::BAD_REQUEST);
+
+    let create_artifact = service
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{}/artifacts", task.uuid))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"type": "notes", "name": null, "body": "Blocked"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_artifact.status(), StatusCode::BAD_REQUEST);
+
+    let reopened = service
+        .oneshot(
+            Request::post(format!("/api/tasks/{}/reopen", task.uuid))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reopened.status(), StatusCode::NO_CONTENT);
+    assert!(app.read_task(&task.uuid).unwrap().completed_at.is_none());
+    assert_eq!(app.list_tasks().unwrap().len(), 1);
 }
 
 #[tokio::test]
