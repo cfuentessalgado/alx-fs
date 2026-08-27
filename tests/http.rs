@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 
-use alx::{App, router};
+use alx::{App, router, router_with_auth, serve};
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -23,6 +23,141 @@ async fn raw_http(address: SocketAddr, request: String) -> String {
 
 fn response_body(response: &str) -> &str {
     response.split_once("\r\n\r\n").unwrap().1
+}
+
+#[tokio::test]
+async fn non_loopback_server_refuses_to_start_without_password() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    let error = serve(app, "0.0.0.0:0".parse().unwrap()).await.unwrap_err();
+    assert!(error.to_string().contains("alx serve password set"));
+}
+
+#[tokio::test]
+async fn protected_router_requires_password_and_accepts_session_cookie() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    app.set_password("correct horse battery staple").unwrap();
+    let service = router_with_auth(app.clone()).unwrap();
+
+    let unauthorized = service
+        .clone()
+        .oneshot(
+            Request::get("/")
+                .header("host", "192.168.1.10:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::SEE_OTHER);
+    assert_eq!(unauthorized.headers().get("location").unwrap(), "/login");
+    let unauthorized_api = service
+        .clone()
+        .oneshot(
+            Request::get("/api/tasks")
+                .header("host", "192.168.1.10:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized_api.status(), StatusCode::UNAUTHORIZED);
+
+    let login_page = service
+        .clone()
+        .oneshot(
+            Request::get("/login")
+                .header("host", "192.168.1.10:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login_page.status(), StatusCode::OK);
+    let login_html = to_bytes(login_page.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&login_html).contains("Sign in to alx"));
+
+    let bad_login = service
+        .clone()
+        .oneshot(
+            Request::post("/api/login")
+                .header("host", "192.168.1.10:3000")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"password": "wrong"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_login.status(), StatusCode::UNAUTHORIZED);
+
+    let login = service
+        .clone()
+        .oneshot(
+            Request::post("/api/login")
+                .header("host", "192.168.1.10:3000")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"password": "correct horse battery staple"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::NO_CONTENT);
+    let set_cookie = login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("SameSite=Strict"));
+    let cookie = set_cookie.split(';').next().unwrap();
+
+    let authorized = service
+        .clone()
+        .oneshot(
+            Request::get("/")
+                .header("host", "192.168.1.10:3000")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+    let hash = std::fs::read_to_string(app.password_path()).unwrap();
+    assert!(hash.starts_with("$argon2id$"));
+    assert!(!hash.contains("correct horse battery staple"));
+
+    app.set_password("rotated password").unwrap();
+    let rotated_cookie = service
+        .clone()
+        .oneshot(
+            Request::get("/api/tasks")
+                .header("host", "192.168.1.10:3000")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated_cookie.status(), StatusCode::UNAUTHORIZED);
+
+    app.clear_password().unwrap();
+    let cleared_cookie = service
+        .oneshot(
+            Request::get("/api/tasks")
+                .header("host", "192.168.1.10:3000")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared_cookie.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

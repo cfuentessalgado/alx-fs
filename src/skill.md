@@ -112,3 +112,16 @@ alx dump --zip ./export.zip
 ```
 
 Dump has no stdout and does not modify the database.
+
+## Serve and authentication
+
+Run the web UI in the foreground with `alx serve`. Loopback serving is unauthenticated. A private-network bind or Tailscale server refuses to start until the single-user password is set. Passwords are entered interactively and are never CLI arguments:
+
+```bash
+alx serve password set
+alx serve password clear
+alx serve --bind 192.168.1.10:3000
+alx serve --tailscale
+```
+
+Install a native per-user service with `alx serve install --bind IP:PORT` or `alx serve install --tailscale`. An unauthenticated visit to `/` redirects to `/login`. Use `alx serve status`, `alx serve restart`, and `alx serve uninstall` to manage it. macOS uses `launchd`; Linux uses user `systemd`. The service runs the normal `alx serve` command.

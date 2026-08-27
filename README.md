@@ -1,6 +1,6 @@
 # alx
 
-`alx` is a native, local task artifact store. It keeps tasks, arbitrary artifact types, and text annotations in SQLite. The CLI and the optional web UI use the same storage layer. No daemon is required.
+`alx` is a native, local task artifact store. It keeps tasks, arbitrary artifact types, and text annotations in SQLite. The CLI and the web UI use the same storage layer. Foreground serving remains available, and an optional native user service can keep the UI available after login or reboot.
 
 ## Install
 
@@ -123,14 +123,28 @@ Ids and names that are unsafe as path components have unsafe characters replaced
 ## Web UI
 
 ```bash
+# Foreground operation
 alx serve
 alx serve --bind 192.168.1.10:8080
 alx serve --tailscale
+
+# Passwords are entered through the terminal, never as CLI arguments.
+alx serve password set
+alx serve password clear
+
+# Install and control the native per-user service.
+alx serve install --bind 192.168.1.10:8080
+alx serve install --tailscale
+alx serve status
+alx serve restart
+alx serve uninstall
 ```
 
-The default is `127.0.0.1:3000`. `--bind` accepts an explicit `IP:PORT`. Port `0` asks the operating system to select a free port; the listening message shows the selected port. `--tailscale` runs `tailscale ip -4` and binds the first valid IPv4 address on port 3000. The options conflict.
+The default is `127.0.0.1:3000`. `--bind` accepts an explicit `IP:PORT`. Port `0` asks the operating system to select a free port; the listening message shows the selected port. `--tailscale` runs `tailscale ip -4` when the server starts and binds the first valid IPv4 address on port 3000. The options conflict.
 
-Remote binding has no user authentication in v1. Anyone who can reach the selected IP and port can create and read stored content, update task bodies, manage annotations, complete, reopen, and archive tasks, and permanently delete tasks. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
+`alx serve install` uses a per-user `launchd` agent on macOS and a per-user `systemd` service on Linux. It runs the normal `alx serve` command and enables automatic start at login. No custom daemon process is used. Service files contain only the executable, bind options, and non-secret database path settings. The password hash is stored separately from SQLite with private file permissions.
+
+Loopback serving is unauthenticated. Any non-loopback bind, including `--tailscale`, requires the configured single-user password. If no password is set, the server refuses to start and points to `alx serve password set`. Requests without a valid in-memory session cookie are redirected from `/` to `/login` and cannot access the API. Login establishes an `HttpOnly`, `SameSite=Strict` session cookie. Sessions expire when the server stops. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
 
 The embedded UI shows active tasks under the `alx` root. `Completed` and `Archived` are separate root folders. Root, task, and artifact type folders can be expanded and collapsed. Completed tasks are read-only and have **Reopen** and **Archive** actions. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task and artifact views have a **Copy** menu. It copies the raw Markdown body, JSON metadata with the matching CLI read command, or only the read command. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, opens feedback actions beside selected text, keeps saved selections highlighted, links each highlight to its feedback card, and resolves annotations. Mermaid fenced code blocks are rendered with Mermaid 11, and code blocks use highlight.js for syntax highlighting. Both libraries and the highlight.js themes are loaded from jsDelivr, so the UI is not fully offline. If the CDN is unreachable, diagram source stays visible and code blocks remain readable without syntax highlighting. Rendered Markdown cannot load images or other remote resources. Editing task bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
 

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>alx sign in</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; margin: 3rem auto; max-width: 24rem; padding: 0 1rem; }
+    label, input, button { display: block; width: 100%; box-sizing: border-box; }
+    input, button { font: inherit; margin-top: .5rem; padding: .6rem; }
+    button { cursor: pointer; }
+    #error { color: #b00020; min-height: 1.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Sign in to alx</h1>
+  <form id="login-form">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <button type="submit">Sign in</button>
+    <p id="error" role="alert"></p>
+  </form>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const error = document.getElementById('error');
+      error.textContent = '';
+      const response = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({password: document.getElementById('password').value})
+      });
+      if (response.ok) location.href = '/';
+      else error.textContent = await response.text();
+    });
+  </script>
+</body>
+</html>

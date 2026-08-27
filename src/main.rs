@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 
 use alx::{AnnotationKind, App, NewAnnotation, parse_bind_address};
 use anyhow::{Result, bail};
@@ -165,10 +165,38 @@ struct DumpArgs {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
+    #[command(subcommand)]
+    command: Option<ServeCommand>,
     #[arg(long, value_name = "IP:PORT", conflicts_with = "tailscale")]
     bind: Option<String>,
     #[arg(long, conflicts_with = "bind")]
     tailscale: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServeCommand {
+    Password(PasswordArgs),
+    Install {
+        #[arg(long, value_name = "IP:PORT", conflicts_with = "tailscale")]
+        bind: Option<String>,
+        #[arg(long, conflicts_with = "bind")]
+        tailscale: bool,
+    },
+    Status,
+    Restart,
+    Uninstall,
+}
+
+#[derive(Debug, Args)]
+struct PasswordArgs {
+    #[command(subcommand)]
+    command: PasswordCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum PasswordCommand {
+    Set,
+    Clear,
 }
 
 #[tokio::main]
@@ -180,13 +208,68 @@ async fn main() -> Result<()> {
         Command::Artifact(args) => run_artifact(&App::from_env()?, args.command)?,
         Command::Annotation(args) => run_annotation(&App::from_env()?, args.command)?,
         Command::Skill(args) => run_skill(args.command)?,
-        Command::Serve(args) => {
-            let address = parse_bind_address(args.bind.as_deref(), args.tailscale)?;
-            alx::serve(App::from_env()?, address).await?;
-        }
+        Command::Serve(args) => run_serve(args).await?,
         Command::Dump(args) => run_dump(&App::from_env()?, args)?,
     }
     Ok(())
+}
+
+async fn run_serve(args: ServeArgs) -> Result<()> {
+    let ServeArgs {
+        command,
+        bind: foreground_bind,
+        tailscale: foreground_tailscale,
+    } = args;
+    match command {
+        None => {
+            let address = parse_bind_address(foreground_bind.as_deref(), foreground_tailscale)?;
+            alx::serve(App::from_env()?, address).await
+        }
+        Some(ServeCommand::Password(password_args)) => {
+            let app = App::from_env()?;
+            match password_args.command {
+                PasswordCommand::Set => {
+                    let first = read_password("Password: ")?;
+                    let second = read_password("Confirm password: ")?;
+                    if first != second {
+                        bail!("passwords do not match");
+                    }
+                    app.set_password(&first)?;
+                }
+                PasswordCommand::Clear => app.clear_password()?,
+            }
+            Ok(())
+        }
+        Some(ServeCommand::Install {
+            bind: install_bind,
+            tailscale: install_tailscale,
+        }) => {
+            let bind = install_bind.or(foreground_bind);
+            let tailscale = install_tailscale || foreground_tailscale;
+            if bind.is_some() && tailscale {
+                bail!("--bind cannot be used with --tailscale");
+            }
+            if let Some(bind) = bind.as_deref() {
+                // Validate now, but resolve --tailscale only when the service starts.
+                parse_bind_address(Some(bind), false)?;
+            }
+            alx::service::install(&alx::service::InstallOptions { bind, tailscale })
+        }
+        Some(ServeCommand::Status) => alx::service::status(),
+        Some(ServeCommand::Restart) => alx::service::restart(),
+        Some(ServeCommand::Uninstall) => alx::service::uninstall(),
+    }
+}
+
+fn read_password(prompt: &str) -> Result<String> {
+    if io::stdin().is_terminal() {
+        return Ok(rpassword::prompt_password(prompt)?);
+    }
+    let config = rpassword::ConfigBuilder::new()
+        .input_reader(io::stdin())
+        .output_writer(io::stderr())
+        .build();
+    Ok(rpassword::prompt_password_with_config(prompt, config)?)
 }
 
 fn run_task(app: &App, command: TaskCommand) -> Result<()> {

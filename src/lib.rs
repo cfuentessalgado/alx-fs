@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     error::Error as StdError,
     fmt, fs,
     io::Write,
@@ -8,23 +8,25 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, Request, State},
-    http::{StatusCode, Uri, header},
+    http::{Method, StatusCode, Uri, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use chrono::Utc;
 use clap::ValueEnum;
 use directories::BaseDirs;
 use pulldown_cmark::{Options, Parser, html};
+use rand::{RngCore, rngs::OsRng};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -32,7 +34,10 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 const SCHEMA: &str = include_str!("schema.sql");
 const INDEX_HTML: &str = include_str!("web/index.html");
+const LOGIN_HTML: &str = include_str!("web/login.html");
 pub const AGENT_SKILL: &str = include_str!("skill.md");
+
+pub mod service;
 
 #[derive(Clone, Debug)]
 pub struct App {
@@ -213,6 +218,83 @@ impl App {
 
     pub fn database_path(&self) -> &Path {
         self.database_path.as_path()
+    }
+
+    /// The password hash is kept outside SQLite so the existing storage schema stays unchanged.
+    pub fn password_path(&self) -> PathBuf {
+        match std::env::var_os("ALX_AUTH_FILE") {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => self
+                .database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("password.hash"),
+        }
+    }
+
+    pub fn has_password(&self) -> Result<bool> {
+        Ok(self.read_password_hash()?.is_some())
+    }
+
+    pub fn set_password(&self, password: &str) -> Result<()> {
+        if password.is_empty() {
+            bail!("password must not be empty");
+        }
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|error| anyhow!("failed to hash password: {error}"))?
+            .to_string();
+        let path = self.password_path();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create password directory {}", parent.display())
+            })?;
+        }
+        let temporary = path.with_file_name(format!(".password-{}.tmp", new_uuid()));
+        let result = (|| -> Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .with_context(|| format!("failed to create {}", temporary.display()))?;
+            set_private_file_mode(&file)?;
+            file.write_all(hash.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)
+                .with_context(|| format!("failed to replace password hash {}", path.display()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub fn clear_password(&self) -> Result<()> {
+        match fs::remove_file(self.password_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn read_password_hash(&self) -> Result<Option<String>> {
+        match fs::read_to_string(self.password_path()) {
+            Ok(contents) => {
+                let hash = contents.trim();
+                if hash.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(hash.to_owned()))
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn connect(&self) -> Result<Connection> {
@@ -944,9 +1026,55 @@ fn tailscale_address_with(program: &Path) -> Result<SocketAddr> {
     Ok(SocketAddr::new(IpAddr::V4(ip), 3000))
 }
 
+#[derive(Clone)]
+struct WebState {
+    app: App,
+    auth: Option<Arc<AuthState>>,
+}
+
+impl std::ops::Deref for WebState {
+    type Target = App;
+
+    fn deref(&self) -> &Self::Target {
+        &self.app
+    }
+}
+
+struct AuthState {
+    app: App,
+    sessions: Mutex<SessionState>,
+}
+
+struct SessionState {
+    /// The hash active when this session set was last synchronized.
+    password_hash: Option<String>,
+    tokens: HashSet<String>,
+}
+
 pub fn router(app: App) -> Router {
-    Router::new()
+    build_router(WebState { app, auth: None })
+}
+
+/// Build a web router with authentication enabled. Loopback servers use `router` instead.
+pub fn router_with_auth(app: App) -> Result<Router> {
+    Ok(build_router(WebState {
+        app: app.clone(),
+        auth: Some(Arc::new(AuthState {
+            app,
+            sessions: Mutex::new(SessionState {
+                password_hash: None,
+                tokens: HashSet::new(),
+            }),
+        })),
+    }))
+}
+
+fn build_router(state: WebState) -> Router {
+    let authentication = state.auth.is_some();
+    let router = Router::new()
         .route("/", get(index))
+        .route("/login", get(login_page))
+        .route("/api/login", post(api_login))
         .route("/api/tasks", get(api_tasks).post(api_create_task))
         .route("/api/completed-tasks", get(api_completed_tasks))
         .route("/api/archived-tasks", get(api_archived_tasks))
@@ -966,18 +1094,31 @@ pub fn router(app: App) -> Router {
         .route(
             "/api/annotations/{uuid}/resolve",
             post(api_resolve_annotation),
-        )
-        .layer(middleware::from_fn(validate_browser_request))
-        .with_state(app)
+        );
+    let router = router.layer(middleware::from_fn(validate_browser_request));
+    let router = if authentication {
+        router.layer(middleware::from_fn_with_state(state.clone(), authenticate))
+    } else {
+        router
+    };
+    router.with_state(state)
 }
 
 pub async fn serve(app: App, address: SocketAddr) -> Result<()> {
+    if !address.ip().is_loopback() && !app.has_password()? {
+        bail!("non-loopback serving requires a password; set one with `alx serve password set`");
+    }
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind {address}"))?;
     let local_address = listener.local_addr()?;
     eprintln!("listening on http://{local_address}");
-    axum::serve(listener, router(app)).await?;
+    let router = if address.ip().is_loopback() {
+        router(app)
+    } else {
+        router_with_auth(app)?
+    };
+    axum::serve(listener, router).await?;
     Ok(())
 }
 
@@ -989,6 +1130,124 @@ async fn index() -> impl IntoResponse {
         )],
         Html(INDEX_HTML),
     )
+}
+
+async fn login_page() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; img-src 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'",
+            ),
+        ],
+        Html(LOGIN_HTML),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginInput {
+    password: String,
+}
+
+async fn api_login(State(state): State<WebState>, Json(input): Json<LoginInput>) -> Response {
+    let Some(auth) = state.auth else {
+        return (StatusCode::NOT_FOUND, "authentication is not enabled").into_response();
+    };
+    let hash = match auth.app.read_password_hash() {
+        Ok(Some(hash)) => hash,
+        Ok(None) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "password authentication is not configured",
+            )
+                .into_response();
+        }
+        Err(error) => {
+            eprintln!("failed to read password hash: {error:#}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response();
+        }
+    };
+    let valid = PasswordHash::new(&hash).ok().is_some_and(|parsed| {
+        Argon2::default()
+            .verify_password(input.password.as_bytes(), &parsed)
+            .is_ok()
+    });
+    if !valid {
+        return (StatusCode::UNAUTHORIZED, "invalid password").into_response();
+    }
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let token = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut sessions = auth.sessions.lock().expect("session mutex poisoned");
+    synchronize_sessions(&mut sessions, Some(&hash));
+    sessions.tokens.insert(token.clone());
+    let cookie = format!("alx_session={token}; Path=/; HttpOnly; SameSite=Strict");
+    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response()
+}
+
+fn synchronize_sessions(state: &mut SessionState, current_hash: Option<&str>) {
+    if state.password_hash.as_deref() != current_hash {
+        state.password_hash = current_hash.map(str::to_owned);
+        state.tokens.clear();
+    }
+}
+
+async fn authenticate(State(state): State<WebState>, request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    if path == "/login" || path == "/api/login" {
+        return next.run(request).await;
+    }
+    let current_hash = state
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.app.read_password_hash().ok().flatten());
+    let configured = current_hash.is_some();
+    let authorized = state.auth.as_ref().is_some_and(|auth| {
+        let mut sessions = auth.sessions.lock().expect("session mutex poisoned");
+        // Password changes happen in a separate CLI process. Compare the current
+        // hash on every request so rotation and clearing revoke old cookies.
+        synchronize_sessions(&mut sessions, current_hash.as_deref());
+        if !configured {
+            return false;
+        }
+        let Some(cookie) = request
+            .headers()
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return false;
+        };
+        let Some(token) = cookie.split(';').find_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            (name == "alx_session").then_some(value)
+        }) else {
+            return false;
+        };
+        sessions.tokens.contains(token)
+    });
+    if authorized {
+        next.run(request).await
+    } else if configured && request.method() == Method::GET && path == "/" {
+        Redirect::to("/login").into_response()
+    } else if !configured {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "password authentication is not configured",
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Cookie realm=alx")],
+            "authentication required",
+        )
+            .into_response()
+    }
 }
 
 async fn validate_browser_request(request: Request, next: Next) -> Response {
@@ -1039,7 +1298,7 @@ fn same_origin(origin: &str, host: &str) -> bool {
             .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
 }
 
-async fn api_tasks(State(app): State<App>) -> ApiResult<Json<Vec<Task>>> {
+async fn api_tasks(State(app): State<WebState>) -> ApiResult<Json<Vec<Task>>> {
     Ok(Json(app.list_tasks()?))
 }
 
@@ -1050,23 +1309,23 @@ struct NewTaskInput {
 }
 
 async fn api_create_task(
-    State(app): State<App>,
+    State(app): State<WebState>,
     Json(input): Json<NewTaskInput>,
 ) -> ApiResult<(StatusCode, Json<Task>)> {
     let task = app.create_task(&input.id, &input.body)?;
     Ok((StatusCode::CREATED, Json(task)))
 }
 
-async fn api_completed_tasks(State(app): State<App>) -> ApiResult<Json<Vec<Task>>> {
+async fn api_completed_tasks(State(app): State<WebState>) -> ApiResult<Json<Vec<Task>>> {
     Ok(Json(app.list_completed_tasks()?))
 }
 
-async fn api_archived_tasks(State(app): State<App>) -> ApiResult<Json<Vec<Task>>> {
+async fn api_archived_tasks(State(app): State<WebState>) -> ApiResult<Json<Vec<Task>>> {
     Ok(Json(app.list_archived_tasks()?))
 }
 
 async fn api_task(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(key): AxumPath<String>,
 ) -> ApiResult<Json<TaskView>> {
     let task = app.read_task(&key)?;
@@ -1090,7 +1349,7 @@ struct TaskUpdateInput {
 }
 
 async fn api_update_task(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(key): AxumPath<String>,
     Json(input): Json<TaskUpdateInput>,
 ) -> ApiResult<StatusCode> {
@@ -1099,7 +1358,7 @@ async fn api_update_task(
 }
 
 async fn api_complete_task(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(key): AxumPath<String>,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
@@ -1108,7 +1367,7 @@ async fn api_complete_task(
 }
 
 async fn api_reopen_task(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(key): AxumPath<String>,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
@@ -1117,7 +1376,7 @@ async fn api_reopen_task(
 }
 
 async fn api_archive_task(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(key): AxumPath<String>,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
@@ -1126,7 +1385,7 @@ async fn api_archive_task(
 }
 
 async fn api_delete_task(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(key): AxumPath<String>,
     Json(input): Json<DeleteConfirmation>,
 ) -> ApiResult<StatusCode> {
@@ -1146,7 +1405,7 @@ struct NewArtifactInput {
 }
 
 async fn api_create_artifact(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(key): AxumPath<String>,
     Json(input): Json<NewArtifactInput>,
 ) -> ApiResult<(StatusCode, Json<Artifact>)> {
@@ -1160,7 +1419,7 @@ async fn api_create_artifact(
 }
 
 async fn api_artifact(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(uuid): AxumPath<String>,
 ) -> ApiResult<Json<ArtifactView>> {
     let artifact = app.read_artifact(&uuid)?;
@@ -1174,7 +1433,7 @@ async fn api_artifact(
 }
 
 async fn api_create_annotation(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(uuid): AxumPath<String>,
     Json(input): Json<NewAnnotation>,
 ) -> ApiResult<(StatusCode, Json<Annotation>)> {
@@ -1183,7 +1442,7 @@ async fn api_create_annotation(
 }
 
 async fn api_resolve_annotation(
-    State(app): State<App>,
+    State(app): State<WebState>,
     AxumPath(uuid): AxumPath<String>,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
@@ -1395,6 +1654,15 @@ fn validate_offsets(start: Option<u64>, end: Option<u64>) -> Result<()> {
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
     value.filter(|text| !text.is_empty())
+}
+
+fn set_private_file_mode(file: &fs::File) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 fn markdown_inline(value: &str) -> String {
