@@ -214,6 +214,10 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(response_body(&root).contains("focus({preventScroll:true})"));
     assert!(response_body(&root).contains("limits.comparePoint"));
     assert!(response_body(&root).contains("document.addEventListener('pointerup'"));
+    assert!(response_body(&root).contains("document.addEventListener('selectionchange'"));
+    assert!(response_body(&root).contains("document.addEventListener('touchend'"));
+    assert!(response_body(&root).contains("selectionPointerActive"));
+    assert!(response_body(&root).contains("-webkit-user-select: text"));
     assert!(!response_body(&root).contains("kind-fieldset"));
     assert!(response_body(&root).contains("task-dialog"));
     assert!(response_body(&root).contains("task-edit-dialog"));
@@ -226,6 +230,10 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(response_body(&root).contains("function submitArtifact"));
     assert!(response_body(&root).contains("data-copy-menu"));
     assert!(response_body(&root).contains("function copyText"));
+    assert!(response_body(&root).contains("function taskContext"));
+    assert!(response_body(&root).contains("function markdownInline"));
+    assert!(response_body(&root).contains("data-copy=\"context\""));
+    assert!(response_body(&root).contains("copyMenu(true)"));
     assert!(response_body(&root).contains("function taskMetadata"));
     assert!(response_body(&root).contains("function artifactMetadata"));
     assert!(response_body(&root).contains("alx task read "));
@@ -236,6 +244,22 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(response_body(&root).contains("data-delete-task"));
     assert!(response_body(&root).contains("window.confirm"));
     assert!(response_body(&root).contains("mermaid@11.12.3"));
+    assert!(response_body(&root).contains("diagram-dialog"));
+    assert!(response_body(&root).contains("function applyDiagramView"));
+    assert!(response_body(&root).contains("function updateDiagramZoom"));
+    assert!(response_body(&root).contains("function openExpandedDiagram"));
+    assert!(response_body(&root).contains("diagramControlGroup('View controls')"));
+    assert!(response_body(&root).contains("diagramControlGroup('Zoom controls')"));
+    assert!(response_body(&root).contains(".diagram-dialog-stage .mermaid.diagram-viewer { position: relative;"));
+    assert!(!response_body(&root).contains("diagram-dialog-close"));
+    assert!(response_body(&root).contains("DIAGRAM_EXPAND_ICON"));
+    assert!(response_body(&root).contains("DIAGRAM_COLLAPSE_ICON"));
+    assert!(response_body(&root).contains("DIAGRAM_FIT_ICON"));
+    assert!(response_body(&root).contains("DIAGRAM_COLLAPSE_ICON,'Collapse diagram'"));
+    assert!(!response_body(&root).contains("diagram.addEventListener('wheel'"));
+    assert!(response_body(&root).contains(r"split(/[\s,]+/)"));
+    assert!(!response_body(&root).contains(r"split(/[\\s,]+/)"));
+    assert!(response_body(&root).contains("data-dragging"));
     assert!(root.contains("content-security-policy:"));
     assert!(root
         .contains("script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://cdn.jsdelivr.net"));
