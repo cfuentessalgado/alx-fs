@@ -5,7 +5,7 @@
 ## Install
 
 ```bash
-cargo install --path .
+cargo install alx-fs
 ```
 
 The database is stored at `~/.local/share/alx/alx.db` on a default Linux setup and `~/Library/Application Support/alx/alx.db` on macOS. Platform directory overrides still apply. Set `ALX_DB=/path/to/alx.db` to use a specific file. Parent directories and the schema are created automatically.
