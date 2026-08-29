@@ -1,19 +1,20 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt, fs,
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, Request, State},
+    extract::{Path as AxumPath, Query, Request, State},
     http::{Method, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -24,6 +25,7 @@ use directories::BaseDirs;
 use pulldown_cmark::{Options, Parser, html};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
@@ -45,6 +47,96 @@ use store::{SqliteStore, Store};
 pub struct App {
     auth_path: Arc<PathBuf>,
     store: Arc<dyn Store>,
+}
+
+const REVIEW_GATE_TTL: Duration = Duration::from_secs(30 * 60);
+const REVIEW_GATE_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000);
+
+#[derive(Clone)]
+struct ReviewGates {
+    gates: Arc<Mutex<HashMap<String, ReviewGate>>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ReviewOutcome {
+    Finished,
+}
+
+struct ReviewGate {
+    artifact_uuid: String,
+    expires_at: Instant,
+    outcome: Option<ReviewOutcome>,
+}
+
+impl Default for ReviewGates {
+    fn default() -> Self {
+        Self {
+            gates: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl ReviewGates {
+    fn create(&self, artifact_uuid: &str) -> Result<String> {
+        let mut gates = self.gates.lock().expect("review gate mutex poisoned");
+        gates.retain(|_, gate| gate.expires_at > Instant::now());
+        let token = loop {
+            let candidate = random_token();
+            if !gates.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        gates.insert(
+            token.clone(),
+            ReviewGate {
+                artifact_uuid: artifact_uuid.to_owned(),
+                expires_at: Instant::now() + REVIEW_GATE_TTL,
+                outcome: None,
+            },
+        );
+        Ok(token)
+    }
+
+    fn artifact_uuid(&self, token: &str) -> Result<String> {
+        let mut gates = self.gates.lock().expect("review gate mutex poisoned");
+        let Some(gate) = gates.get(token) else {
+            return Err(error::not_found("review gate not found or expired"));
+        };
+        if gate.expires_at <= Instant::now() {
+            gates.remove(token);
+            return Err(error::not_found("review gate not found or expired"));
+        }
+        Ok(gate.artifact_uuid.clone())
+    }
+
+    fn finish(&self, token: &str) -> Result<()> {
+        let mut gates = self.gates.lock().expect("review gate mutex poisoned");
+        let Some(gate) = gates.get_mut(token) else {
+            return Err(error::not_found("review gate not found or expired"));
+        };
+        if gate.expires_at <= Instant::now() {
+            gates.remove(token);
+            return Err(error::not_found("review gate not found or expired"));
+        }
+        if gate.outcome.is_some() {
+            return Err(invalid("review gate has already been finished"));
+        }
+        gate.outcome = Some(ReviewOutcome::Finished);
+        Ok(())
+    }
+
+    fn outcome(&self, token: &str) -> Result<Option<ReviewOutcome>> {
+        let mut gates = self.gates.lock().expect("review gate mutex poisoned");
+        let Some(gate) = gates.get(token) else {
+            return Err(error::not_found("review gate not found or expired"));
+        };
+        if gate.expires_at <= Instant::now() {
+            gates.remove(token);
+            return Err(error::not_found("review gate not found or expired"));
+        }
+        Ok(gate.outcome)
+    }
 }
 
 impl fmt::Debug for App {
@@ -281,6 +373,18 @@ impl App {
         self.feedback_markdown_at_level(artifact_uuid, 1)
     }
 
+    pub fn ensure_artifact_writable(&self, artifact_uuid: &str) -> Result<Artifact> {
+        let artifact = self.read_artifact(artifact_uuid)?;
+        let task = self.read_task(&artifact.task_uuid)?;
+        if task.archived_at.is_some() {
+            bail!("archived task is read-only: {}", task.id);
+        }
+        if task.completed_at.is_some() {
+            bail!("completed task is read-only: {}", task.id);
+        }
+        Ok(artifact)
+    }
+
     pub fn review_markdown(&self, artifact_uuid: &str) -> Result<String> {
         let artifact = self.read_artifact(artifact_uuid)?;
         let feedback = self.feedback_markdown_at_level(&artifact.uuid, 2)?;
@@ -390,6 +494,170 @@ impl App {
     }
 }
 
+/// Run an interactive browser review and print the resulting review to stdout.
+///
+/// A running loopback server is reused when possible. Otherwise this process owns
+/// a temporary server for the duration of the review. Gate state is kept in memory.
+pub async fn run_interactive_review(app: App, artifact_uuid: &str, no_open: bool) -> Result<()> {
+    let artifact = app.ensure_artifact_writable(artifact_uuid)?;
+
+    let mut owned_server = None;
+    let address = match tokio::net::TcpListener::bind(REVIEW_GATE_ADDRESS).await {
+        Ok(listener) => {
+            let gates = ReviewGates::default();
+            let router = router_with_gates(app.clone(), gates);
+            let address = listener.local_addr()?;
+            owned_server = Some(tokio::spawn(async move {
+                if let Err(error) = axum::serve(listener, router).await {
+                    eprintln!("review server stopped: {error}");
+                }
+            }));
+            address
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => REVIEW_GATE_ADDRESS,
+        Err(error) => return Err(error).context("failed to start local review server"),
+    };
+
+    let registration = register_review_gate(address, &artifact.uuid).await?;
+    let url = format!(
+        "http://{address}/review/{}?gate={}",
+        artifact.uuid, registration.token
+    );
+    eprintln!("Review URL: {url}");
+    if !no_open {
+        open_review_url(&url);
+    }
+
+    loop {
+        if review_gate_finished(address, &registration.token).await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    if let Some(server) = owned_server {
+        server.abort();
+    }
+    print!("{}", app.review_markdown(artifact_uuid)?);
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct GateRegistration {
+    token: String,
+}
+
+async fn register_review_gate(
+    address: SocketAddr,
+    artifact_uuid: &str,
+) -> Result<GateRegistration> {
+    let body = serde_json::to_string(&serde_json::json!({ "artifact_uuid": artifact_uuid }))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match review_http_request(address, "POST", "/api/review-gates", Some(&body)).await {
+            Ok((201, response)) => {
+                return serde_json::from_str(&response)
+                    .context("local review server returned invalid gate data");
+            }
+            Ok((404, _response)) => {
+                bail!("the local alx server does not support review gates; restart it")
+            }
+            Ok((status, response)) => {
+                bail!(
+                    "could not create review gate (HTTP {status}): {}",
+                    response.trim()
+                )
+            }
+            Err(error) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ = error;
+            }
+            Err(error) => return Err(error).context("could not connect to local alx server"),
+        }
+    }
+}
+
+async fn review_gate_finished(address: SocketAddr, token: &str) -> Result<bool> {
+    let path = format!("/api/review-gates/{token}");
+    let (status, response) = review_http_request(address, "GET", &path, None).await?;
+    if status == 200 {
+        #[derive(Deserialize)]
+        struct GateStatus {
+            outcome: Option<ReviewOutcome>,
+        }
+        return Ok(serde_json::from_str::<GateStatus>(&response)?
+            .outcome
+            .is_some());
+    }
+    bail!(
+        "review gate is no longer available (HTTP {status}): {}",
+        response.trim()
+    )
+}
+
+async fn review_http_request(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Result<(u16, String)> {
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    .context("timed out connecting to local alx server")??;
+    let body = body.unwrap_or("");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
+        .await
+        .context("timed out reading local alx server response")??;
+    let response =
+        String::from_utf8(response).context("local alx server returned non-UTF-8 data")?;
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow!("local alx server returned an invalid HTTP response"))?;
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| anyhow!("local alx server returned an invalid HTTP status"))?
+        .parse::<u16>()?;
+    Ok((status, body.to_owned()))
+}
+
+fn open_review_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg(url).stdout(Stdio::null()).status();
+    #[cfg(target_os = "linux")]
+    let result = Command::new("xdg-open")
+        .arg(url)
+        .stdout(Stdio::null())
+        .status();
+    #[cfg(target_os = "windows")]
+    let result = Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .stdout(Stdio::null())
+        .status();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let result: std::io::Result<std::process::ExitStatus> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "browser opening is not supported on this platform",
+    ));
+    if let Ok(status) = &result
+        && !status.success()
+    {
+        eprintln!("Could not open review URL in a browser (exit status: {status})");
+    }
+    if let Err(error) = result {
+        eprintln!("Could not open review URL in a browser: {error}");
+    }
+}
+
 pub fn default_database_path() -> Result<PathBuf> {
     let dirs =
         BaseDirs::new().ok_or_else(|| anyhow!("could not determine the user data directory"))?;
@@ -460,6 +728,7 @@ fn tailscale_address_with(program: &Path) -> Result<SocketAddr> {
 struct WebState {
     app: App,
     auth: Option<Arc<AuthState>>,
+    gates: ReviewGates,
 }
 
 impl std::ops::Deref for WebState {
@@ -482,13 +751,22 @@ struct SessionState {
 }
 
 pub fn router(app: App) -> Router {
-    build_router(WebState { app, auth: None })
+    router_with_gates(app, ReviewGates::default())
+}
+
+fn router_with_gates(app: App, gates: ReviewGates) -> Router {
+    build_router(WebState {
+        app,
+        auth: None,
+        gates,
+    })
 }
 
 /// Build a web router with authentication enabled. Loopback servers use `router` instead.
 pub fn router_with_auth(app: App) -> Result<Router> {
     Ok(build_router(WebState {
         app: app.clone(),
+        gates: ReviewGates::default(),
         auth: Some(Arc::new(AuthState {
             app,
             sessions: Mutex::new(SessionState {
@@ -503,11 +781,18 @@ fn build_router(state: WebState) -> Router {
     let authentication = state.auth.is_some();
     let router = Router::new()
         .route("/", get(index))
+        .route("/review/{uuid}", get(review_page))
         .route("/login", get(login_page))
         .route("/api/login", post(api_login))
         .route("/api/tasks", get(api_tasks).post(api_create_task))
         .route("/api/completed-tasks", get(api_completed_tasks))
         .route("/api/archived-tasks", get(api_archived_tasks))
+        .route("/api/review-gates", post(api_create_review_gate))
+        .route("/api/review-gates/{token}", get(api_review_gate_status))
+        .route(
+            "/api/review-gates/{token}/finish",
+            post(api_finish_review_gate),
+        )
         .route(
             "/api/tasks/{key}",
             get(api_task).put(api_update_task).delete(api_delete_task),
@@ -562,6 +847,24 @@ async fn index() -> impl IntoResponse {
     )
 }
 
+async fn review_page(
+    State(state): State<WebState>,
+    AxumPath(uuid): AxumPath<String>,
+    Query(query): Query<ReviewQuery>,
+) -> ApiResult<Response> {
+    let gate_uuid = state.gates.artifact_uuid(&query.gate)?;
+    if gate_uuid != uuid {
+        return Err(invalid("review gate does not belong to this artifact").into());
+    }
+    state.app.read_artifact(&uuid)?;
+    Ok(index().await.into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewQuery {
+    gate: String,
+}
+
 async fn login_page() -> impl IntoResponse {
     (
         [
@@ -573,6 +876,40 @@ async fn login_page() -> impl IntoResponse {
         ],
         Html(LOGIN_HTML),
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct NewReviewGate {
+    artifact_uuid: String,
+}
+
+async fn api_create_review_gate(
+    State(state): State<WebState>,
+    Json(input): Json<NewReviewGate>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let artifact = state.app.ensure_artifact_writable(&input.artifact_uuid)?;
+    let token = state.gates.create(&artifact.uuid)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "token": token })),
+    ))
+}
+
+async fn api_review_gate_status(
+    State(state): State<WebState>,
+    AxumPath(token): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({
+        "outcome": state.gates.outcome(&token)?,
+    })))
+}
+
+async fn api_finish_review_gate(
+    State(state): State<WebState>,
+    AxumPath(token): AxumPath<String>,
+) -> ApiResult<StatusCode> {
+    state.gates.finish(&token)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1046,6 +1383,12 @@ fn now() -> String {
 
 fn new_uuid() -> String {
     Uuid::now_v7().to_string()
+}
+
+fn random_token() -> String {
+    let mut bytes = [0_u8; 24];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn set_private_file_mode(file: &fs::File) -> Result<()> {

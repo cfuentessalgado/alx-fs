@@ -68,6 +68,8 @@ alx artifact list ARE-1175 --json
 alx artifact feedback "$ARTIFACT_UUID"
 alx artifact feedback "$ARTIFACT_UUID" --json
 alx artifact review "$ARTIFACT_UUID"
+alx artifact review "$ARTIFACT_UUID" --interactive
+alx artifact review "$ARTIFACT_UUID" --interactive --no-open
 ```
 
 Create prints only the UUID. Read prints only the body. Update and rename have no stdout on success. If `--name` is omitted, create stores a fallback display name such as `research--01a03e73.md`. Plain artifact lists use:
@@ -76,7 +78,7 @@ Create prints only the UUID. Read prints only the body. Update and rename have n
 uuid<TAB>type<TAB>name<TAB>updated_at
 ```
 
-Names are presentation metadata. UUIDs remain the canonical identity for reads, updates, renames, annotations, and references. Duplicate names are allowed. Renaming does not change the UUID, type, body, or references. Artifact types are arbitrary non-empty strings and remain independent from names. More than one artifact of the same type is allowed for a task. `artifact feedback` prints raw unresolved annotation data. `artifact review` prints artifact-neutral review instructions followed by the same canonical unresolved feedback formatting.
+Names are presentation metadata. UUIDs remain the canonical identity for reads, updates, renames, annotations, and references. Duplicate names are allowed. Renaming does not change the UUID, type, body, or references. Artifact types are arbitrary non-empty strings and remain independent from names. More than one artifact of the same type is allowed for a task. `artifact feedback` prints raw unresolved annotation data. `artifact review` prints artifact-neutral review instructions followed by the same canonical unresolved feedback formatting. With `--interactive`, the command starts or reuses the local web server, prints a review URL to stderr, and waits for **Finish review** in the browser. The browser attempts to close the review tab after finishing. If the browser blocks scripted tab closing, it shows a close-tab message. It then reads and prints the current unresolved feedback. Use `--no-open` to print the URL without opening a browser. Interactive review state is ephemeral; annotations remain durable if the CLI or browser stops.
 
 Agent instructions generated from task context include this guidance:
 
@@ -146,11 +148,11 @@ The default is `127.0.0.1:3000`. `--bind` accepts an explicit `IP:PORT`. Port `0
 
 Loopback serving is unauthenticated. Any non-loopback bind, including `--tailscale`, requires the configured single-user password. If no password is set, the server refuses to start and points to `alx serve password set`. Requests without a valid in-memory session cookie are redirected from `/` to `/login` and cannot access the API. Login establishes an `HttpOnly`, `SameSite=Strict` session cookie. Sessions expire when the server stops. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
 
-The embedded UI shows active tasks under the `alx` root. `Completed` and `Archived` are separate root folders. Root, task, and artifact type folders can be expanded and collapsed. Completed tasks are read-only and have **Reopen** and **Archive** actions. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task and artifact views have a **Copy** menu. It copies the raw Markdown body, JSON metadata with the matching CLI read command, or only the read command. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, opens feedback actions beside selected text, keeps saved selections highlighted, links each highlight to its feedback card, and resolves annotations. Mermaid fenced code blocks are rendered with Mermaid 11. Diagram viewers support expand, fit-to-view, button-based zoom, and drag-to-pan without an additional zoom library. Code blocks use highlight.js for syntax highlighting. Both libraries and the highlight.js themes are loaded from jsDelivr, so the UI is not fully offline. If the CDN is unreachable, diagram source stays visible and code blocks remain readable without syntax highlighting. Rendered Markdown cannot load images or other remote resources. Editing task bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
+The embedded UI shows active tasks under the `alx` root. An interactive review URL opens the selected artifact and shows a **Finish review** action. Existing and newly created unresolved annotations are visible; resolved annotations stay hidden by default. `Completed` and `Archived` are separate root folders. Root, task, and artifact type folders can be expanded and collapsed. Completed tasks are read-only and have **Reopen** and **Archive** actions. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task and artifact views have a **Copy** menu. It copies the raw Markdown body, JSON metadata with the matching CLI read command, or only the read command. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, opens feedback actions beside selected text, keeps saved selections highlighted, links each highlight to its feedback card, and resolves annotations. Mermaid fenced code blocks are rendered with Mermaid 11. Diagram viewers support expand, fit-to-view, button-based zoom, and drag-to-pan without an additional zoom library. Code blocks use highlight.js for syntax highlighting. Both libraries and the highlight.js themes are loaded from jsDelivr, so the UI is not fully offline. If the CDN is unreachable, diagram source stays visible and code blocks remain readable without syntax highlighting. Rendered Markdown cannot load images or other remote resources. Editing task bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
 
 ## Pipeline behavior
 
-Successful data output goes to stdout. Errors and the `serve` listening address go to stderr. There are no table headers, labels, colors, or decorative status lines on stdout. JSON output is a stable serialized array of the complete stored records.
+Successful data output goes to stdout. Errors, review URLs, and the `serve` listening address go to stderr. There are no table headers, labels, colors, or decorative status lines on stdout. JSON output is a stable serialized array of the complete stored records.
 
 Examples:
 
@@ -158,5 +160,6 @@ Examples:
 alx artifact read "$ARTIFACT_UUID" | glow
 alx artifact feedback "$ARTIFACT_UUID" | pbcopy
 alx artifact review "$ARTIFACT_UUID" | pbcopy
+alx artifact review "$ARTIFACT_UUID" --interactive --no-open | pi
 alx task context ARE-1175 | nvim -
 ```

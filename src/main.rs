@@ -108,6 +108,10 @@ enum ArtifactCommand {
     },
     Review {
         uuid: String,
+        #[arg(long)]
+        interactive: bool,
+        #[arg(long, requires = "interactive")]
+        no_open: bool,
     },
 }
 
@@ -205,7 +209,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Task(args) => run_task(&App::from_env()?, args.command)?,
-        Command::Artifact(args) => run_artifact(&App::from_env()?, args.command)?,
+        Command::Artifact(args) => run_artifact(&App::from_env()?, args.command).await?,
         Command::Annotation(args) => run_annotation(&App::from_env()?, args.command)?,
         Command::Skill(args) => run_skill(args.command)?,
         Command::Serve(args) => run_serve(args).await?,
@@ -337,7 +341,7 @@ fn run_task(app: &App, command: TaskCommand) -> Result<()> {
     Ok(())
 }
 
-fn run_artifact(app: &App, command: ArtifactCommand) -> Result<()> {
+async fn run_artifact(app: &App, command: ArtifactCommand) -> Result<()> {
     match command {
         ArtifactCommand::Create {
             task_id_or_uuid,
@@ -389,7 +393,17 @@ fn run_artifact(app: &App, command: ArtifactCommand) -> Result<()> {
                 print!("{}", app.feedback_markdown(&uuid)?);
             }
         }
-        ArtifactCommand::Review { uuid } => print!("{}", app.review_markdown(&uuid)?),
+        ArtifactCommand::Review {
+            uuid,
+            interactive,
+            no_open,
+        } => {
+            if interactive {
+                alx::run_interactive_review(app.clone(), &uuid, no_open).await?;
+            } else {
+                print!("{}", app.review_markdown(&uuid)?);
+            }
+        }
     }
     Ok(())
 }

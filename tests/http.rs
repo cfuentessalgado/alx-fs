@@ -316,6 +316,112 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
 }
 
 #[tokio::test]
+async fn review_gates_validate_artifact_tokens_and_finish_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    let task = app.create_task("GATE-1", "Body").unwrap();
+    let artifact = app
+        .create_artifact(&task.uuid, "notes", "Artifact")
+        .unwrap();
+    let service = router(app);
+
+    let response = service
+        .clone()
+        .oneshot(
+            Request::post("/api/review-gates")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"artifact_uuid": &artifact.uuid}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let token = serde_json::from_slice::<Value>(&body).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let pending_status = service
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/review-gates/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending_status.status(), StatusCode::OK);
+    let pending_body = to_bytes(pending_status.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(serde_json::from_slice::<Value>(&pending_body).unwrap()["outcome"].is_null());
+
+    let page = service
+        .clone()
+        .oneshot(
+            Request::get(format!("/review/{}?gate={token}", artifact.uuid))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let page_body = to_bytes(page.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&page_body).contains("Artifact Explorer"));
+
+    let mismatch = service
+        .clone()
+        .oneshot(
+            Request::get(format!("/review/not-the-artifact?gate={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+
+    let finish = service
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/review-gates/{token}/finish"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(finish.status(), StatusCode::NO_CONTENT);
+
+    let status = service
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/review-gates/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = to_bytes(status.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&status_body).unwrap()["outcome"],
+        "finished"
+    );
+
+    let repeated = service
+        .oneshot(
+            Request::post(format!("/api/review-gates/{token}/finish"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn http_routes_share_storage_and_sanitize_markdown() {
     let directory = tempfile::tempdir().unwrap();
     let app = App::new(directory.path().join("alx.db")).unwrap();

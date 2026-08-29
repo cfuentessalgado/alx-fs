@@ -1,6 +1,6 @@
 [package]
 name = "alx-fs"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 description = "A persistent task artifact store"
 repository = "https://github.com/cfuentessalgado/alx-fs"
@@ -28,7 +28,7 @@ rpassword = "7.5"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "net"] }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "net", "time", "io-util"] }
 uuid = { version = "1.18", features = ["serde", "v7"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 

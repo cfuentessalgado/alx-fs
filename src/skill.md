@@ -78,9 +78,11 @@ Get agent-ready review instructions before revising an artifact:
 
 ```bash
 alx artifact review ARTIFACT_UUID
+alx artifact review ARTIFACT_UUID --interactive
+alx artifact review ARTIFACT_UUID --interactive --no-open
 ```
 
-Use `alx artifact feedback ARTIFACT_UUID` for raw unresolved annotation output. Add `--json` when exact annotation fields or offsets are needed. Resolve an annotation only after its feedback has been addressed or deliberately declined:
+Use `alx artifact feedback ARTIFACT_UUID` for raw unresolved annotation output. Add `--json` when exact annotation fields or offsets are needed. Use `alx artifact review ARTIFACT_UUID --interactive` to pause a workflow for interactive browser review. The command prints the URL to stderr, opens it, and waits for **Finish review**. The browser attempts to close the review tab after finishing, but may require manual closing. It then prints the current unresolved feedback to stdout. Use `--no-open` for remote or SSH workflows. Interactive review state is temporary; annotations are saved immediately. Resolve an annotation only after its feedback has been addressed or deliberately declined:
 
 ```bash
 alx annotation resolve ANNOTATION_UUID
