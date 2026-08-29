@@ -250,7 +250,10 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(response_body(&root).contains("function openExpandedDiagram"));
     assert!(response_body(&root).contains("diagramControlGroup('View controls')"));
     assert!(response_body(&root).contains("diagramControlGroup('Zoom controls')"));
-    assert!(response_body(&root).contains(".diagram-dialog-stage .mermaid.diagram-viewer { position: relative;"));
+    assert!(
+        response_body(&root)
+            .contains(".diagram-dialog-stage .mermaid.diagram-viewer { position: relative;")
+    );
     assert!(!response_body(&root).contains("diagram-dialog-close"));
     assert!(response_body(&root).contains("DIAGRAM_EXPAND_ICON"));
     assert!(response_body(&root).contains("DIAGRAM_COLLAPSE_ICON"));
@@ -706,7 +709,8 @@ async fn archived_is_a_valid_task_id_in_http_routes() {
 #[tokio::test]
 async fn http_distinguishes_domain_errors_from_storage_failures() {
     let directory = tempfile::tempdir().unwrap();
-    let app = App::new(directory.path().join("alx.db")).unwrap();
+    let database_path = directory.path().join("alx.db");
+    let app = App::new(&database_path).unwrap();
     let service = router(app.clone());
 
     let missing = service
@@ -720,7 +724,7 @@ async fn http_distinguishes_domain_errors_from_storage_failures() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
-    let connection = rusqlite::Connection::open(app.database_path()).unwrap();
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
     connection.execute("DROP TABLE tasks", []).unwrap();
     let failure = service
         .oneshot(Request::get("/api/tasks").body(Body::empty()).unwrap())

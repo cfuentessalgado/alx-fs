@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use alx::{AnnotationKind, App, NewAnnotation};
 use tempfile::TempDir;
 
@@ -7,10 +9,25 @@ fn test_app() -> (TempDir, App) {
     (directory, app)
 }
 
+fn migration_versions(database_path: impl AsRef<Path>) -> Vec<i64> {
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let mut statement = connection
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<i64>>>()
+        .unwrap()
+}
+
 #[test]
 fn migrates_and_supports_task_crud_and_lookup() {
-    let (_directory, app) = test_app();
-    assert_eq!(app.migration_versions().unwrap(), vec![1, 2, 3, 4]);
+    let (directory, app) = test_app();
+    assert_eq!(
+        migration_versions(directory.path().join("nested/alx.db")),
+        vec![1, 2, 3, 4]
+    );
 
     let task = app.create_task("ARE-1175", "Investigate search").unwrap();
     assert_eq!(app.read_task("ARE-1175").unwrap(), task);
@@ -249,7 +266,7 @@ fn migrates_existing_tasks_and_artifacts_with_nullable_metadata() {
     drop(connection);
 
     let app = App::new(&database_path).unwrap();
-    assert_eq!(app.migration_versions().unwrap(), vec![1, 2, 3, 4]);
+    assert_eq!(migration_versions(&database_path), vec![1, 2, 3, 4]);
     assert_eq!(app.read_task("OLD-1").unwrap().archived_at, None);
     assert_eq!(app.read_task("OLD-1").unwrap().completed_at, None);
     let artifact = app

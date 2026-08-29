@@ -1,15 +1,12 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashSet},
-    error::Error as StdError,
     fmt, fs,
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Command,
-    str::FromStr,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -23,122 +20,40 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use clap::ValueEnum;
 use directories::BaseDirs;
 use pulldown_cmark::{Options, Parser, html};
 use rand::{RngCore, rngs::OsRng};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-const SCHEMA: &str = include_str!("schema.sql");
 const INDEX_HTML: &str = include_str!("web/index.html");
 const LOGIN_HTML: &str = include_str!("web/login.html");
 pub const AGENT_SKILL: &str = include_str!("skill.md");
 
 pub mod service;
 
-#[derive(Clone, Debug)]
+mod error;
+mod model;
+mod store;
+
+use error::{DomainError, DomainErrorKind, invalid};
+pub use model::{Annotation, AnnotationKind, Artifact, NewAnnotation, Task};
+use store::{SqliteStore, Store};
+
+#[derive(Clone)]
 pub struct App {
-    database_path: Arc<PathBuf>,
+    auth_path: Arc<PathBuf>,
+    store: Arc<dyn Store>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Task {
-    pub uuid: String,
-    pub id: String,
-    pub body: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub archived_at: Option<String>,
-    pub completed_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Artifact {
-    pub uuid: String,
-    pub task_uuid: String,
-    #[serde(rename = "type")]
-    pub artifact_type: String,
-    pub name: Option<String>,
-    pub body: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl Artifact {
-    pub fn display_name(&self) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| artifact_fallback_name(&self.artifact_type, &self.uuid))
+impl fmt::Debug for App {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("App")
+            .field("auth_path", &self.auth_path)
+            .finish()
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Annotation {
-    pub uuid: String,
-    pub artifact_uuid: String,
-    pub kind: AnnotationKind,
-    pub start_offset: Option<u64>,
-    pub end_offset: Option<u64>,
-    pub selected_text: Option<String>,
-    pub body: Option<String>,
-    pub created_at: String,
-    pub resolved_at: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-#[serde(rename_all = "lowercase")]
-#[value(rename_all = "lower")]
-pub enum AnnotationKind {
-    Comment,
-    Question,
-    Scratch,
-    Good,
-}
-
-impl AnnotationKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Comment => "comment",
-            Self::Question => "question",
-            Self::Scratch => "scratch",
-            Self::Good => "good",
-        }
-    }
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Comment => "Comment",
-            Self::Question => "Question",
-            Self::Scratch => "Scratch",
-            Self::Good => "Good",
-        }
-    }
-}
-
-impl FromStr for AnnotationKind {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "comment" => Ok(Self::Comment),
-            "question" => Ok(Self::Question),
-            "scratch" => Ok(Self::Scratch),
-            "good" => Ok(Self::Good),
-            _ => bail!("unsupported annotation kind: {value}"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NewAnnotation {
-    pub kind: AnnotationKind,
-    pub start_offset: Option<u64>,
-    pub end_offset: Option<u64>,
-    pub selected_text: Option<String>,
-    pub body: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,42 +70,6 @@ struct ArtifactView {
     annotations: Vec<Annotation>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DomainErrorKind {
-    Invalid,
-    NotFound,
-}
-
-#[derive(Debug)]
-struct DomainError {
-    kind: DomainErrorKind,
-    message: String,
-}
-
-impl fmt::Display for DomainError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl StdError for DomainError {}
-
-fn invalid(message: impl Into<String>) -> anyhow::Error {
-    DomainError {
-        kind: DomainErrorKind::Invalid,
-        message: message.into(),
-    }
-    .into()
-}
-
-fn not_found(message: impl Into<String>) -> anyhow::Error {
-    DomainError {
-        kind: DomainErrorKind::NotFound,
-        message: message.into(),
-    }
-    .into()
-}
-
 impl App {
     pub fn from_env() -> Result<Self> {
         let path = match std::env::var_os("ALX_DB") {
@@ -202,34 +81,31 @@ impl App {
 
     pub fn new(database_path: impl Into<PathBuf>) -> Result<Self> {
         let database_path = database_path.into();
-        if let Some(parent) = database_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create database directory {}", parent.display())
-            })?;
-        }
-        let app = Self {
-            database_path: Arc::new(database_path),
+        let auth_path = match std::env::var_os("ALX_AUTH_FILE") {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("password.hash"),
         };
-        app.migrate()?;
-        Ok(app)
+        let store = Arc::new(SqliteStore::new(database_path)?);
+        Ok(Self {
+            auth_path: Arc::new(auth_path),
+            store,
+        })
     }
 
-    pub fn database_path(&self) -> &Path {
-        self.database_path.as_path()
+    #[cfg(test)]
+    fn with_store(auth_path: PathBuf, store: Arc<dyn Store>) -> Self {
+        Self {
+            auth_path: Arc::new(auth_path),
+            store,
+        }
     }
 
     /// The password hash is kept outside SQLite so the existing storage schema stays unchanged.
     pub fn password_path(&self) -> PathBuf {
-        match std::env::var_os("ALX_AUTH_FILE") {
-            Some(value) if !value.is_empty() => PathBuf::from(value),
-            _ => self
-                .database_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("password.hash"),
-        }
+        self.auth_path.as_path().to_path_buf()
     }
 
     pub fn has_password(&self) -> Result<bool> {
@@ -297,300 +173,48 @@ impl App {
         }
     }
 
-    fn connect(&self) -> Result<Connection> {
-        let connection = Connection::open(self.database_path.as_path()).with_context(|| {
-            format!(
-                "failed to open SQLite database {}",
-                self.database_path.display()
-            )
-        })?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        Ok(connection)
-    }
-
-    fn migrate(&self) -> Result<()> {
-        let mut connection = self.connect()?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute_batch(SCHEMA)?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
-            [now()],
-        )?;
-        let has_artifact_name: bool = transaction.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('artifacts') WHERE name = 'name'
-             )",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_artifact_name {
-            transaction.execute("ALTER TABLE artifacts ADD COLUMN name TEXT", [])?;
-        }
-        transaction.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
-            [now()],
-        )?;
-        let has_task_archived_at: bool = transaction.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'archived_at'
-             )",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_task_archived_at {
-            transaction.execute("ALTER TABLE tasks ADD COLUMN archived_at TEXT", [])?;
-        }
-        transaction.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
-            [now()],
-        )?;
-        let has_task_completed_at: bool = transaction.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'completed_at'
-             )",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_task_completed_at {
-            transaction.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT", [])?;
-        }
-        transaction.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?1)",
-            [now()],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
     pub fn create_task(&self, id: &str, body: &str) -> Result<Task> {
-        validate_non_empty("task id", id)?;
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        let duplicate = transaction
-            .query_row("SELECT 1 FROM tasks WHERE id = ?1", [id], |_| Ok(()))
-            .optional()?;
-        if duplicate.is_some() {
-            return Err(invalid(format!("task id already exists: {id}")));
-        }
-
-        let normalized_id = normalized_uuid(id);
-        if let Some(normalized_id) = normalized_id.as_deref() {
-            let collision = transaction
-                .query_row(
-                    "SELECT 1 FROM tasks WHERE uuid = ?1",
-                    [normalized_id],
-                    |_| Ok(()),
-                )
-                .optional()?;
-            if collision.is_some() {
-                return Err(invalid(format!(
-                    "task id conflicts with an existing task UUID: {id}"
-                )));
-            }
-        }
-
-        let uuid = loop {
-            let candidate = new_uuid();
-            let mut statement = transaction.prepare("SELECT id FROM tasks")?;
-            let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
-            let mut collision = normalized_id.as_deref() == Some(candidate.as_str());
-            for existing_id in ids {
-                if normalized_uuid(&existing_id?).as_deref() == Some(candidate.as_str()) {
-                    collision = true;
-                    break;
-                }
-            }
-            drop(statement);
-            if !collision {
-                break candidate;
-            }
-        };
-        let timestamp = now();
-        let task = Task {
-            uuid,
-            id: id.to_owned(),
-            body: body.to_owned(),
-            created_at: timestamp.clone(),
-            updated_at: timestamp,
-            archived_at: None,
-            completed_at: None,
-        };
-        transaction
-            .execute(
-                "INSERT INTO tasks(uuid, id, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![task.uuid, task.id, task.body, task.created_at, task.updated_at],
-            )
-            .with_context(|| format!("failed to create task {id}"))?;
-        transaction.commit()?;
-        Ok(task)
+        self.store.create_task(id, body)
     }
 
     pub fn read_task(&self, key: &str) -> Result<Task> {
-        validate_non_empty("task identifier", key)?;
-        let connection = self.connect()?;
-        let by_id = connection
-            .query_row(
-                "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks WHERE id = ?1",
-                [key],
-                task_from_row,
-            )
-            .optional()?;
-        let by_uuid = match normalized_uuid(key) {
-            Some(uuid) => connection
-                .query_row(
-                    "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks WHERE uuid = ?1",
-                    [uuid],
-                    task_from_row,
-                )
-                .optional()?,
-            None => None,
-        };
-        match (by_id, by_uuid) {
-            (Some(by_id), Some(by_uuid)) if by_id.uuid != by_uuid.uuid => Err(invalid(format!(
-                "ambiguous task identifier matches an id and a UUID: {key}"
-            ))),
-            (Some(task), _) | (None, Some(task)) => Ok(task),
-            (None, None) => Err(not_found(format!("task not found: {key}"))),
-        }
+        self.store.read_task(key)
     }
 
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
-        self.list_tasks_with_condition("archived_at IS NULL AND completed_at IS NULL")
+        self.store.list_tasks()
     }
 
     pub fn list_completed_tasks(&self) -> Result<Vec<Task>> {
-        self.list_tasks_with_condition("archived_at IS NULL AND completed_at IS NOT NULL")
+        self.store.list_completed_tasks()
     }
 
     pub fn list_archived_tasks(&self) -> Result<Vec<Task>> {
-        self.list_tasks_with_condition("archived_at IS NOT NULL")
-    }
-
-    fn list_tasks_with_condition(&self, condition: &str) -> Result<Vec<Task>> {
-        let connection = self.connect()?;
-        let sql = format!(
-            "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at
-             FROM tasks WHERE {condition} ORDER BY created_at, uuid"
-        );
-        let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map([], task_from_row)?;
-        collect_rows(rows)
+        self.store.list_archived_tasks()
     }
 
     pub fn search_tasks(&self, query: &str) -> Result<Vec<Task>> {
-        validate_non_empty("search query", query)?;
-        let pattern = format!("%{query}%");
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks
-             WHERE archived_at IS NULL AND completed_at IS NULL AND (id LIKE ?1 OR body LIKE ?1)
-             ORDER BY updated_at DESC, uuid",
-        )?;
-        let rows = statement.query_map([pattern], task_from_row)?;
-        collect_rows(rows)
+        self.store.search_tasks(query)
     }
 
     pub fn update_task(&self, key: &str, body: &str) -> Result<()> {
-        let task = self.read_task(key)?;
-        ensure_task_writable(&task)?;
-        let changed = self.connect()?.execute(
-            "UPDATE tasks SET body = ?2, updated_at = ?3
-             WHERE uuid = ?1 AND archived_at IS NULL AND completed_at IS NULL",
-            params![task.uuid, body, now()],
-        )?;
-        if changed == 0 {
-            ensure_task_writable(&self.read_task(&task.uuid)?)?;
-            return Err(not_found(format!("task not found: {key}")));
-        }
-        Ok(())
+        self.store.update_task(key, body)
     }
 
     pub fn complete_task(&self, key: &str) -> Result<()> {
-        let task = self.read_task(key)?;
-        if task.archived_at.is_some() {
-            return Err(invalid(format!(
-                "archived task cannot be completed: {}",
-                task.id
-            )));
-        }
-        if task.completed_at.is_some() {
-            return Ok(());
-        }
-        let timestamp = now();
-        let changed = self.connect()?.execute(
-            "UPDATE tasks SET completed_at = ?2, updated_at = ?2
-             WHERE uuid = ?1 AND archived_at IS NULL AND completed_at IS NULL",
-            params![task.uuid, timestamp],
-        )?;
-        if changed == 0 {
-            let current = self.read_task(&task.uuid)?;
-            if current.archived_at.is_some() {
-                return Err(invalid(format!(
-                    "archived task cannot be completed: {}",
-                    current.id
-                )));
-            }
-        }
-        Ok(())
+        self.store.complete_task(key)
     }
 
     pub fn reopen_task(&self, key: &str) -> Result<()> {
-        let task = self.read_task(key)?;
-        if task.archived_at.is_some() {
-            return Err(invalid(format!(
-                "archived task cannot be reopened: {}",
-                task.id
-            )));
-        }
-        if task.completed_at.is_none() {
-            return Ok(());
-        }
-        let timestamp = now();
-        let changed = self.connect()?.execute(
-            "UPDATE tasks SET completed_at = NULL, updated_at = ?2
-             WHERE uuid = ?1 AND archived_at IS NULL AND completed_at IS NOT NULL",
-            params![task.uuid, timestamp],
-        )?;
-        if changed == 0 {
-            let current = self.read_task(&task.uuid)?;
-            if current.archived_at.is_some() {
-                return Err(invalid(format!(
-                    "archived task cannot be reopened: {}",
-                    current.id
-                )));
-            }
-        }
-        Ok(())
+        self.store.reopen_task(key)
     }
 
     pub fn archive_task(&self, key: &str) -> Result<()> {
-        let task = self.read_task(key)?;
-        if task.archived_at.is_some() {
-            return Ok(());
-        }
-        let timestamp = now();
-        let changed = self.connect()?.execute(
-            "UPDATE tasks SET archived_at = ?2, updated_at = ?2 WHERE uuid = ?1",
-            params![task.uuid, timestamp],
-        )?;
-        if changed == 0 {
-            return Err(not_found(format!("task not found: {key}")));
-        }
-        Ok(())
+        self.store.archive_task(key)
     }
 
     pub fn delete_task(&self, key: &str) -> Result<()> {
-        let task = self.read_task(key)?;
-        let changed = self
-            .connect()?
-            .execute("DELETE FROM tasks WHERE uuid = ?1", [task.uuid])?;
-        if changed == 0 {
-            return Err(not_found(format!("task not found: {key}")));
-        }
-        Ok(())
+        self.store.delete_task(key)
     }
 
     pub fn create_artifact(
@@ -599,7 +223,7 @@ impl App {
         artifact_type: &str,
         body: &str,
     ) -> Result<Artifact> {
-        self.create_artifact_with_name(task_key, artifact_type, None, body)
+        self.store.create_artifact(task_key, artifact_type, body)
     }
 
     pub fn create_artifact_with_name(
@@ -609,102 +233,20 @@ impl App {
         name: Option<&str>,
         body: &str,
     ) -> Result<Artifact> {
-        validate_non_empty("artifact type", artifact_type)?;
-        if let Some(name) = name {
-            validate_non_empty("artifact name", name)?;
-        }
-        let task = self.read_task(task_key)?;
-        ensure_task_writable(&task)?;
-        let timestamp = now();
-        let uuid = new_uuid();
-        let name = name
-            .map(str::to_owned)
-            .or_else(|| Some(artifact_fallback_name(artifact_type, &uuid)));
-        let artifact = Artifact {
-            uuid,
-            task_uuid: task.uuid,
-            artifact_type: artifact_type.to_owned(),
-            name,
-            body: body.to_owned(),
-            created_at: timestamp.clone(),
-            updated_at: timestamp,
-        };
-        let changed = self.connect()?.execute(
-            "INSERT INTO artifacts(uuid, task_uuid, type, name, body, created_at, updated_at)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
-             WHERE EXISTS(
-                 SELECT 1 FROM tasks
-                 WHERE uuid = ?2 AND archived_at IS NULL AND completed_at IS NULL
-             )",
-            params![
-                artifact.uuid,
-                artifact.task_uuid,
-                artifact.artifact_type,
-                artifact.name,
-                artifact.body,
-                artifact.created_at,
-                artifact.updated_at
-            ],
-        )?;
-        if changed == 0 {
-            ensure_task_writable(&self.read_task(&artifact.task_uuid)?)?;
-            return Err(invalid("task state changed while creating artifact"));
-        }
-        Ok(artifact)
+        self.store
+            .create_artifact_with_name(task_key, artifact_type, name, body)
     }
 
     pub fn read_artifact(&self, uuid: &str) -> Result<Artifact> {
-        let normalized = require_uuid(uuid)?;
-        self.connect()?
-            .query_row(
-                "SELECT uuid, task_uuid, type, name, body, created_at, updated_at
-                 FROM artifacts WHERE uuid = ?1",
-                [normalized],
-                artifact_from_row,
-            )
-            .optional()?
-            .ok_or_else(|| not_found(format!("artifact not found: {uuid}")))
+        self.store.read_artifact(uuid)
     }
 
     pub fn update_artifact(&self, uuid: &str, body: &str) -> Result<()> {
-        let artifact = self.read_artifact(uuid)?;
-        ensure_task_writable(&self.read_task(&artifact.task_uuid)?)?;
-        let changed = self.connect()?.execute(
-            "UPDATE artifacts SET body = ?2, updated_at = ?3
-             WHERE uuid = ?1 AND EXISTS(
-                 SELECT 1 FROM tasks
-                 WHERE tasks.uuid = artifacts.task_uuid
-                   AND archived_at IS NULL AND completed_at IS NULL
-             )",
-            params![artifact.uuid, body, now()],
-        )?;
-        if changed == 0 {
-            let current = self.read_artifact(&artifact.uuid)?;
-            ensure_task_writable(&self.read_task(&current.task_uuid)?)?;
-            return Err(not_found(format!("artifact not found: {uuid}")));
-        }
-        Ok(())
+        self.store.update_artifact(uuid, body)
     }
 
     pub fn rename_artifact(&self, uuid: &str, name: &str) -> Result<()> {
-        let artifact = self.read_artifact(uuid)?;
-        ensure_task_writable(&self.read_task(&artifact.task_uuid)?)?;
-        validate_non_empty("artifact name", name)?;
-        let changed = self.connect()?.execute(
-            "UPDATE artifacts SET name = ?2, updated_at = ?3
-             WHERE uuid = ?1 AND EXISTS(
-                 SELECT 1 FROM tasks
-                 WHERE tasks.uuid = artifacts.task_uuid
-                   AND archived_at IS NULL AND completed_at IS NULL
-             )",
-            params![artifact.uuid, name, now()],
-        )?;
-        if changed == 0 {
-            let current = self.read_artifact(&artifact.uuid)?;
-            ensure_task_writable(&self.read_task(&current.task_uuid)?)?;
-            return Err(not_found(format!("artifact not found: {uuid}")));
-        }
-        Ok(())
+        self.store.rename_artifact(uuid, name)
     }
 
     pub fn list_artifacts(
@@ -712,19 +254,7 @@ impl App {
         task_key: &str,
         artifact_type: Option<&str>,
     ) -> Result<Vec<Artifact>> {
-        if let Some(value) = artifact_type {
-            validate_non_empty("artifact type", value)?;
-        }
-        let task = self.read_task(task_key)?;
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT uuid, task_uuid, type, name, body, created_at, updated_at
-             FROM artifacts
-             WHERE task_uuid = ?1 AND (?2 IS NULL OR type = ?2)
-             ORDER BY created_at, uuid",
-        )?;
-        let rows = statement.query_map(params![task.uuid, artifact_type], artifact_from_row)?;
-        collect_rows(rows)
+        self.store.list_artifacts(task_key, artifact_type)
     }
 
     pub fn create_annotation(
@@ -732,49 +262,7 @@ impl App {
         artifact_uuid: &str,
         input: NewAnnotation,
     ) -> Result<Annotation> {
-        let artifact = self.read_artifact(artifact_uuid)?;
-        ensure_task_writable(&self.read_task(&artifact.task_uuid)?)?;
-        validate_offsets(input.start_offset, input.end_offset)?;
-        let annotation = Annotation {
-            uuid: new_uuid(),
-            artifact_uuid: artifact.uuid,
-            kind: input.kind,
-            start_offset: input.start_offset,
-            end_offset: input.end_offset,
-            selected_text: normalize_optional(input.selected_text),
-            body: normalize_optional(input.body),
-            created_at: now(),
-            resolved_at: None,
-        };
-        let changed = self.connect()?.execute(
-            "INSERT INTO annotations(
-                uuid, artifact_uuid, kind, start_offset, end_offset, selected_text, body,
-                created_at, resolved_at
-             )
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL
-             WHERE EXISTS(
-                 SELECT 1 FROM artifacts
-                 JOIN tasks ON tasks.uuid = artifacts.task_uuid
-                 WHERE artifacts.uuid = ?2
-                   AND tasks.archived_at IS NULL AND tasks.completed_at IS NULL
-             )",
-            params![
-                annotation.uuid,
-                annotation.artifact_uuid,
-                annotation.kind.as_str(),
-                annotation.start_offset,
-                annotation.end_offset,
-                annotation.selected_text,
-                annotation.body,
-                annotation.created_at
-            ],
-        )?;
-        if changed == 0 {
-            let current = self.read_artifact(&annotation.artifact_uuid)?;
-            ensure_task_writable(&self.read_task(&current.task_uuid)?)?;
-            return Err(invalid("task state changed while creating annotation"));
-        }
-        Ok(annotation)
+        self.store.create_annotation(artifact_uuid, input)
     }
 
     pub fn list_annotations(
@@ -782,61 +270,11 @@ impl App {
         artifact_uuid: &str,
         include_resolved: bool,
     ) -> Result<Vec<Annotation>> {
-        let artifact = self.read_artifact(artifact_uuid)?;
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT uuid, artifact_uuid, kind, start_offset, end_offset, selected_text,
-                    body, created_at, resolved_at
-             FROM annotations
-             WHERE artifact_uuid = ?1 AND (?2 OR resolved_at IS NULL)
-             ORDER BY created_at, uuid",
-        )?;
-        let rows = statement.query_map(
-            params![artifact.uuid, include_resolved],
-            annotation_from_row,
-        )?;
-        collect_rows(rows)
+        self.store.list_annotations(artifact_uuid, include_resolved)
     }
 
     pub fn resolve_annotation(&self, uuid: &str) -> Result<()> {
-        let normalized = require_uuid(uuid)?;
-        let connection = self.connect()?;
-        let task_uuid = connection
-            .query_row(
-                "SELECT artifacts.task_uuid FROM annotations
-                 JOIN artifacts ON artifacts.uuid = annotations.artifact_uuid
-                 WHERE annotations.uuid = ?1",
-                [&normalized],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or_else(|| not_found(format!("annotation not found: {uuid}")))?;
-        ensure_task_writable(&self.read_task(&task_uuid)?)?;
-        let changed = connection.execute(
-            "UPDATE annotations SET resolved_at = COALESCE(resolved_at, ?2)
-             WHERE uuid = ?1 AND EXISTS(
-                 SELECT 1 FROM artifacts
-                 JOIN tasks ON tasks.uuid = artifacts.task_uuid
-                 WHERE artifacts.uuid = annotations.artifact_uuid
-                   AND tasks.archived_at IS NULL AND tasks.completed_at IS NULL
-             )",
-            params![normalized, now()],
-        )?;
-        if changed == 0 {
-            let current_task_uuid = connection
-                .query_row(
-                    "SELECT artifacts.task_uuid FROM annotations
-                     JOIN artifacts ON artifacts.uuid = annotations.artifact_uuid
-                     WHERE annotations.uuid = ?1",
-                    [&normalized],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-                .ok_or_else(|| not_found(format!("annotation not found: {uuid}")))?;
-            ensure_task_writable(&self.read_task(&current_task_uuid)?)?;
-            return Err(not_found(format!("annotation not found: {uuid}")));
-        }
-        Ok(())
+        self.store.resolve_annotation(uuid)
     }
 
     pub fn feedback_markdown(&self, artifact_uuid: &str) -> Result<String> {
@@ -949,14 +387,6 @@ impl App {
             write_directory(target, &files)?;
         }
         Ok(())
-    }
-
-    pub fn migration_versions(&self) -> Result<Vec<i64>> {
-        let connection = self.connect()?;
-        let mut statement =
-            connection.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
-        let rows = statement.query_map([], |row| row.get(0))?;
-        collect_rows(rows)
     }
 }
 
@@ -1618,44 +1048,6 @@ fn new_uuid() -> String {
     Uuid::now_v7().to_string()
 }
 
-fn normalized_uuid(value: &str) -> Option<String> {
-    Uuid::parse_str(value).ok().map(|uuid| uuid.to_string())
-}
-
-fn require_uuid(value: &str) -> Result<String> {
-    normalized_uuid(value).ok_or_else(|| invalid(format!("invalid UUID: {value}")))
-}
-
-fn ensure_task_writable(task: &Task) -> Result<()> {
-    if task.archived_at.is_some() {
-        return Err(invalid(format!("archived task is read-only: {}", task.id)));
-    }
-    if task.completed_at.is_some() {
-        return Err(invalid(format!("completed task is read-only: {}", task.id)));
-    }
-    Ok(())
-}
-
-fn validate_non_empty(name: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return Err(invalid(format!("{name} must not be empty")));
-    }
-    Ok(())
-}
-
-fn validate_offsets(start: Option<u64>, end: Option<u64>) -> Result<()> {
-    match (start, end) {
-        (None, None) => Ok(()),
-        (Some(start), Some(end)) if end >= start => Ok(()),
-        (Some(_), Some(_)) => Err(invalid("end offset must not be less than start offset")),
-        _ => Err(invalid("start and end offsets must be supplied together")),
-    }
-}
-
-fn normalize_optional(value: Option<String>) -> Option<String> {
-    value.filter(|text| !text.is_empty())
-}
-
 fn set_private_file_mode(file: &fs::File) -> Result<()> {
     #[cfg(unix)]
     {
@@ -1680,72 +1072,155 @@ fn markdown_inline(value: &str) -> String {
     output
 }
 
-fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
-    Ok(Task {
-        uuid: row.get(0)?,
-        id: row.get(1)?,
-        body: row.get(2)?,
-        created_at: row.get(3)?,
-        updated_at: row.get(4)?,
-        archived_at: row.get(5)?,
-        completed_at: row.get(6)?,
-    })
-}
+#[cfg(test)]
+mod store_tests {
+    use std::sync::{Arc, Mutex};
 
-fn artifact_fallback_name(artifact_type: &str, uuid: &str) -> String {
-    format!("{artifact_type}--{}.md", &uuid[..8])
-}
+    use super::*;
 
-fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
-    Ok(Artifact {
-        uuid: row.get(0)?,
-        task_uuid: row.get(1)?,
-        artifact_type: row.get(2)?,
-        name: row.get(3)?,
-        body: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
-    })
-}
+    struct RecordingStore {
+        create_task_calls: Mutex<Vec<(String, String)>>,
+    }
 
-fn annotation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Annotation> {
-    let kind: String = row.get(2)?;
-    let kind = <AnnotationKind as FromStr>::from_str(&kind).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            2,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                error.to_string(),
-            )),
-        )
-    })?;
-    Ok(Annotation {
-        uuid: row.get(0)?,
-        artifact_uuid: row.get(1)?,
-        kind,
-        start_offset: row.get(3)?,
-        end_offset: row.get(4)?,
-        selected_text: row.get(5)?,
-        body: row.get(6)?,
-        created_at: row.get(7)?,
-        resolved_at: row.get(8)?,
-    })
-}
+    impl Store for RecordingStore {
+        fn create_task(&self, id: &str, body: &str) -> Result<Task> {
+            self.create_task_calls
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), body.to_owned()));
+            Ok(Task {
+                uuid: "injected-uuid".to_owned(),
+                id: "injected-id".to_owned(),
+                body: "injected-body".to_owned(),
+                created_at: "created".to_owned(),
+                updated_at: "updated".to_owned(),
+                archived_at: None,
+                completed_at: None,
+            })
+        }
 
-fn collect_rows<T>(
-    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
-) -> Result<Vec<T>> {
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
+        fn read_task(&self, _key: &str) -> Result<Task> {
+            unreachable!()
+        }
+
+        fn list_tasks(&self) -> Result<Vec<Task>> {
+            unreachable!()
+        }
+
+        fn list_completed_tasks(&self) -> Result<Vec<Task>> {
+            unreachable!()
+        }
+
+        fn list_archived_tasks(&self) -> Result<Vec<Task>> {
+            unreachable!()
+        }
+
+        fn search_tasks(&self, _query: &str) -> Result<Vec<Task>> {
+            unreachable!()
+        }
+
+        fn update_task(&self, _key: &str, _body: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn complete_task(&self, _key: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn reopen_task(&self, _key: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn archive_task(&self, _key: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn delete_task(&self, _key: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn create_artifact(
+            &self,
+            _task_key: &str,
+            _artifact_type: &str,
+            _body: &str,
+        ) -> Result<Artifact> {
+            unreachable!()
+        }
+
+        fn create_artifact_with_name(
+            &self,
+            _task_key: &str,
+            _artifact_type: &str,
+            _name: Option<&str>,
+            _body: &str,
+        ) -> Result<Artifact> {
+            unreachable!()
+        }
+
+        fn read_artifact(&self, _uuid: &str) -> Result<Artifact> {
+            unreachable!()
+        }
+
+        fn update_artifact(&self, _uuid: &str, _body: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn rename_artifact(&self, _uuid: &str, _name: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn list_artifacts(
+            &self,
+            _task_key: &str,
+            _artifact_type: Option<&str>,
+        ) -> Result<Vec<Artifact>> {
+            unreachable!()
+        }
+
+        fn create_annotation(
+            &self,
+            _artifact_uuid: &str,
+            _input: NewAnnotation,
+        ) -> Result<Annotation> {
+            unreachable!()
+        }
+
+        fn list_annotations(
+            &self,
+            _artifact_uuid: &str,
+            _include_resolved: bool,
+        ) -> Result<Vec<Annotation>> {
+            unreachable!()
+        }
+
+        fn resolve_annotation(&self, _uuid: &str) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn app_delegates_task_creation_and_forwards_arguments() {
+        let store = Arc::new(RecordingStore {
+            create_task_calls: Mutex::new(Vec::new()),
+        });
+        let app = App::with_store(PathBuf::from("password.hash"), store.clone());
+
+        let task = app.create_task("task", "body").unwrap();
+
+        assert_eq!(task.id, "injected-id");
+        assert_eq!(
+            *store.create_task_calls.lock().unwrap(),
+            vec![("task".to_owned(), "body".to_owned())]
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-
-    use super::*;
 
     fn fake_command(script: &str) -> (tempfile::TempDir, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
