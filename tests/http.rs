@@ -52,6 +52,18 @@ async fn protected_router_requires_password_and_accepts_session_cookie() {
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::SEE_OTHER);
     assert_eq!(unauthorized.headers().get("location").unwrap(), "/login");
+    let status = service
+        .clone()
+        .oneshot(
+            Request::get("/api/status")
+                .header("host", "192.168.1.10:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+
     let unauthorized_api = service
         .clone()
         .oneshot(
@@ -161,6 +173,34 @@ async fn protected_router_requires_password_and_accepts_session_cookie() {
 }
 
 #[tokio::test]
+async fn cli_review_token_authorizes_review_gate_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = App::new(directory.path().join("alx.db")).unwrap();
+    app.set_password("password").unwrap();
+    let task = app.create_task("CLI-GATE-1", "Body").unwrap();
+    let artifact = app
+        .create_artifact(&task.uuid, "notes", "Artifact")
+        .unwrap();
+    std::fs::write(directory.path().join("cli.token"), "test-cli-token\n").unwrap();
+    let service = router_with_auth(app).unwrap();
+
+    let response = service
+        .oneshot(
+            Request::post("/api/review-gates")
+                .header("host", "100.64.0.8:3000")
+                .header("x-alx-cli-token", "test-cli-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"artifact_uuid": &artifact.uuid}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn network_user_journey_loads_ui_and_manages_feedback() {
     let directory = tempfile::tempdir().unwrap();
     let app = App::new(directory.path().join("alx.db")).unwrap();
@@ -229,6 +269,7 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(response_body(&root).contains("function submitTask"));
     assert!(response_body(&root).contains("function submitArtifact"));
     assert!(response_body(&root).contains("data-copy-menu"));
+    assert!(response_body(&root).contains("data-copy=\"uuid\""));
     assert!(response_body(&root).contains("function copyText"));
     assert!(response_body(&root).contains("function taskContext"));
     assert!(response_body(&root).contains("function markdownInline"));

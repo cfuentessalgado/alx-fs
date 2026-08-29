@@ -10,6 +10,8 @@ use std::process::Stdio;
 use anyhow::{Context, Result, anyhow, bail};
 use directories::BaseDirs;
 
+use crate::ServerEndpoint;
+
 pub const SERVICE_LABEL: &str = "com.alx.serve";
 
 #[derive(Clone, Debug, Default)]
@@ -127,6 +129,58 @@ pub fn uninstall() -> Result<()> {
     }
     eprintln!("uninstalled alx service");
     Ok(())
+}
+
+/// Resolve the endpoint configured for the installed service, if one exists.
+///
+/// The service file is the source of truth. Tailscale addresses are resolved each
+/// time because they can change between service installation and use.
+pub fn configured_endpoint() -> Result<Option<ServerEndpoint>> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let path = service_file_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read service file {}", path.display()))?;
+        let address = if contains_argument(&contents, "--tailscale") {
+            crate::parse_bind_address(None, true)?
+        } else if let Some(bind) = argument_value(&contents, "--bind") {
+            crate::parse_bind_address(Some(&bind), false)?
+        } else {
+            crate::parse_bind_address(None, false)?
+        };
+        Ok(Some(ServerEndpoint {
+            address,
+            scheme: "http",
+            requires_auth: !address.ip().is_loopback(),
+        }))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    Ok(None)
+}
+
+fn contains_argument(contents: &str, argument: &str) -> bool {
+    contents.contains(&format!("<string>{argument}</string>"))
+        || contents.contains(&format!("\"{argument}\""))
+}
+
+fn argument_value(contents: &str, argument: &str) -> Option<String> {
+    let xml_marker = format!("<string>{argument}</string>");
+    if let Some(position) = contents.find(&xml_marker) {
+        let remainder = &contents[position + xml_marker.len()..];
+        let start = remainder.find("<string>")? + "<string>".len();
+        let value = &remainder[start..];
+        return Some(value.split_once("</string>")?.0.to_owned());
+    }
+
+    let marker = format!("\"{argument}\"");
+    let position = contents.find(&marker)?;
+    let remainder = &contents[position + marker.len()..];
+    let start = remainder.find('"')? + 1;
+    let value = &remainder[start..];
+    Some(value.split_once('"')?.0.to_owned())
 }
 
 pub fn service_file_path() -> Result<PathBuf> {
@@ -302,4 +356,21 @@ fn run_command(program: &str, arguments: &[&str]) -> Result<()> {
         bail!("{program} {} failed with {status}", arguments.join(" "));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{argument_value, contains_argument};
+
+    #[test]
+    fn reads_tailscale_and_bind_arguments_from_service_formats() {
+        let plist = "<string>serve</string><string>--tailscale</string>";
+        assert!(contains_argument(plist, "--tailscale"));
+
+        let unit = "ExecStart=\"/usr/bin/alx\" \"serve\" \"--bind\" \"192.0.2.10:3000\"";
+        assert_eq!(
+            argument_value(unit, "--bind"),
+            Some("192.0.2.10:3000".to_owned())
+        );
+    }
 }

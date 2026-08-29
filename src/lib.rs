@@ -49,6 +49,13 @@ pub struct App {
     store: Arc<dyn Store>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ServerEndpoint {
+    pub address: SocketAddr,
+    pub scheme: &'static str,
+    pub requires_auth: bool,
+}
+
 const REVIEW_GATE_TTL: Duration = Duration::from_secs(30 * 60);
 const REVIEW_GATE_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000);
 
@@ -202,6 +209,55 @@ impl App {
 
     pub fn has_password(&self) -> Result<bool> {
         Ok(self.read_password_hash()?.is_some())
+    }
+
+    fn cli_token_path(&self) -> PathBuf {
+        self.auth_path.with_file_name("cli.token")
+    }
+
+    /// Return the private credential used by trusted local CLI requests.
+    pub(crate) fn cli_token(&self) -> Result<String> {
+        let path = self.cli_token_path();
+        match fs::read_to_string(&path) {
+            Ok(contents) if !contents.trim().is_empty() => Ok(contents.trim().to_owned()),
+            Ok(_) => bail!("CLI control credential is empty: {}", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create credential directory {}", parent.display())
+                    })?;
+                }
+                let token = random_token();
+                let temporary = path.with_file_name(format!(".cli-token-{}.tmp", new_uuid()));
+                let result = (|| -> Result<()> {
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&temporary)
+                        .with_context(|| format!("failed to create {}", temporary.display()))?;
+                    set_private_file_mode(&file)?;
+                    file.write_all(token.as_bytes())?;
+                    file.write_all(b"\n")?;
+                    file.sync_all()?;
+                    fs::rename(&temporary, &path).with_context(|| {
+                        format!("failed to replace CLI credential {}", path.display())
+                    })?;
+                    Ok(())
+                })();
+                if result.is_ok() {
+                    return Ok(token);
+                }
+                let _ = fs::remove_file(&temporary);
+                if path.exists() {
+                    return self.cli_token();
+                }
+                result.map(|_| token)
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to read CLI credential {}", path.display())),
+        }
     }
 
     pub fn set_password(&self, password: &str) -> Result<()> {
@@ -496,32 +552,61 @@ impl App {
 
 /// Run an interactive browser review and print the resulting review to stdout.
 ///
-/// A running loopback server is reused when possible. Otherwise this process owns
-/// a temporary server for the duration of the review. Gate state is kept in memory.
+/// A configured service is always preferred. If no service is configured, an
+/// already-running compatible loopback server is reused; otherwise this process
+/// owns a temporary loopback server for the duration of the review.
 pub async fn run_interactive_review(app: App, artifact_uuid: &str, no_open: bool) -> Result<()> {
     let artifact = app.ensure_artifact_writable(artifact_uuid)?;
-
     let mut owned_server = None;
-    let address = match tokio::net::TcpListener::bind(REVIEW_GATE_ADDRESS).await {
-        Ok(listener) => {
-            let gates = ReviewGates::default();
-            let router = router_with_gates(app.clone(), gates);
-            let address = listener.local_addr()?;
-            owned_server = Some(tokio::spawn(async move {
-                if let Err(error) = axum::serve(listener, router).await {
-                    eprintln!("review server stopped: {error}");
+    let endpoint = if let Some(configured) = service::configured_endpoint()? {
+        let client = ReviewHttpClient::new(configured.clone(), Some(app.cli_token()?));
+        ensure_server_available(&client, true).await?;
+        configured
+    } else {
+        let loopback = ServerEndpoint {
+            address: REVIEW_GATE_ADDRESS,
+            scheme: "http",
+            requires_auth: false,
+        };
+        let loopback_client = ReviewHttpClient::new(loopback.clone(), None);
+        match ensure_server_available(&loopback_client, false).await {
+            Ok(()) => loopback,
+            Err(error) if is_connection_error(&error) => {
+                let listener = tokio::net::TcpListener::bind(REVIEW_GATE_ADDRESS)
+                    .await
+                    .context("failed to start local review server")?;
+                let gates = ReviewGates::default();
+                let router = router_with_gates(app.clone(), gates);
+                let address = listener.local_addr()?;
+                owned_server = Some(tokio::spawn(async move {
+                    if let Err(error) = axum::serve(listener, router).await {
+                        eprintln!("review server stopped: {error}");
+                    }
+                }));
+                ServerEndpoint {
+                    address,
+                    scheme: "http",
+                    requires_auth: false,
                 }
-            }));
-            address
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => REVIEW_GATE_ADDRESS,
-        Err(error) => return Err(error).context("failed to start local review server"),
     };
 
-    let registration = register_review_gate(address, &artifact.uuid).await?;
+    let client = ReviewHttpClient::new(
+        endpoint.clone(),
+        endpoint
+            .requires_auth
+            .then(|| app.cli_token())
+            .transpose()?,
+    );
+    let registration = register_review_gate(&client, &artifact.uuid).await?;
     let url = format!(
-        "http://{address}/review/{}?gate={}",
-        artifact.uuid, registration.token
+        "{}://{}/review/{}?gate={}",
+        endpoint.scheme,
+        url_authority(endpoint.address),
+        artifact.uuid,
+        registration.token
     );
     eprintln!("Review URL: {url}");
     if !no_open {
@@ -529,7 +614,7 @@ pub async fn run_interactive_review(app: App, artifact_uuid: &str, no_open: bool
     }
 
     loop {
-        if review_gate_finished(address, &registration.token).await? {
+        if review_gate_finished(&client, &registration.token).await? {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -541,25 +626,94 @@ pub async fn run_interactive_review(app: App, artifact_uuid: &str, no_open: bool
     Ok(())
 }
 
+#[derive(Clone)]
+struct ReviewHttpClient {
+    endpoint: ServerEndpoint,
+    cli_token: Option<String>,
+}
+
+impl ReviewHttpClient {
+    fn new(endpoint: ServerEndpoint, cli_token: Option<String>) -> Self {
+        Self {
+            endpoint,
+            cli_token,
+        }
+    }
+
+    async fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<(u16, String)> {
+        review_http_request(
+            &self.endpoint,
+            self.cli_token.as_deref(),
+            method,
+            path,
+            body,
+        )
+        .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerStatus {
+    service: String,
+    review_gates: bool,
+}
+
+async fn ensure_server_available(client: &ReviewHttpClient, configured: bool) -> Result<()> {
+    let result = client.request("GET", "/api/status", None).await;
+    let (status, response) = match result {
+        Ok(value) => value,
+        Err(error) if configured => {
+            bail!(
+                "configured alx server is not reachable at {}: {error:#}",
+                client.endpoint.address
+            )
+        }
+        Err(error) => return Err(error),
+    };
+    if status != 200 {
+        bail!(
+            "alx server at {} is incompatible (HTTP {status}): restart it",
+            client.endpoint.address
+        );
+    }
+    let status: ServerStatus =
+        serde_json::from_str(&response).context("alx server returned invalid status data")?;
+    if status.service != "alx" || !status.review_gates {
+        bail!(
+            "alx server at {} does not support interactive review gates; restart it",
+            client.endpoint.address
+        );
+    }
+    Ok(())
+}
+
+fn is_connection_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("connecting to alx server") || text.contains("could not connect")
+}
+
 #[derive(Debug, Deserialize)]
 struct GateRegistration {
     token: String,
 }
 
 async fn register_review_gate(
-    address: SocketAddr,
+    client: &ReviewHttpClient,
     artifact_uuid: &str,
 ) -> Result<GateRegistration> {
     let body = serde_json::to_string(&serde_json::json!({ "artifact_uuid": artifact_uuid }))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match review_http_request(address, "POST", "/api/review-gates", Some(&body)).await {
+        match client
+            .request("POST", "/api/review-gates", Some(&body))
+            .await
+        {
             Ok((201, response)) => {
                 return serde_json::from_str(&response)
-                    .context("local review server returned invalid gate data");
+                    .context("alx server returned invalid gate data");
             }
             Ok((404, _response)) => {
-                bail!("the local alx server does not support review gates; restart it")
+                bail!("the alx server does not support review gates; restart it")
             }
             Ok((status, response)) => {
                 bail!(
@@ -571,14 +725,14 @@ async fn register_review_gate(
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 let _ = error;
             }
-            Err(error) => return Err(error).context("could not connect to local alx server"),
+            Err(error) => return Err(error).context("could not connect to alx server"),
         }
     }
 }
 
-async fn review_gate_finished(address: SocketAddr, token: &str) -> Result<bool> {
+async fn review_gate_finished(client: &ReviewHttpClient, token: &str) -> Result<bool> {
     let path = format!("/api/review-gates/{token}");
-    let (status, response) = review_http_request(address, "GET", &path, None).await?;
+    let (status, response) = client.request("GET", &path, None).await?;
     if status == 200 {
         #[derive(Deserialize)]
         struct GateStatus {
@@ -595,39 +749,51 @@ async fn review_gate_finished(address: SocketAddr, token: &str) -> Result<bool> 
 }
 
 async fn review_http_request(
-    address: SocketAddr,
+    endpoint: &ServerEndpoint,
+    cli_token: Option<&str>,
     method: &str,
     path: &str,
     body: Option<&str>,
 ) -> Result<(u16, String)> {
     let mut stream = tokio::time::timeout(
         Duration::from_secs(2),
-        tokio::net::TcpStream::connect(address),
+        tokio::net::TcpStream::connect(endpoint.address),
     )
     .await
-    .context("timed out connecting to local alx server")??;
+    .context("timed out connecting to alx server")?
+    .context("could not connect to alx server")?;
     let body = body.unwrap_or("");
+    let cli_header = cli_token
+        .map(|token| format!("X-Alx-CLI-Token: {token}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{cli_header}Connection: close\r\n\r\n{body}",
+        endpoint.address,
         body.len()
     );
     stream.write_all(request.as_bytes()).await?;
     let mut response = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
         .await
-        .context("timed out reading local alx server response")??;
-    let response =
-        String::from_utf8(response).context("local alx server returned non-UTF-8 data")?;
+        .context("timed out reading alx server response")??;
+    let response = String::from_utf8(response).context("alx server returned non-UTF-8 data")?;
     let (head, body) = response
         .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow!("local alx server returned an invalid HTTP response"))?;
+        .ok_or_else(|| anyhow!("alx server returned an invalid HTTP response"))?;
     let status = head
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
-        .ok_or_else(|| anyhow!("local alx server returned an invalid HTTP status"))?
+        .ok_or_else(|| anyhow!("alx server returned an invalid HTTP status"))?
         .parse::<u16>()?;
     Ok((status, body.to_owned()))
+}
+
+fn url_authority(address: SocketAddr) -> String {
+    match address {
+        SocketAddr::V4(address) => address.to_string(),
+        SocketAddr::V6(address) => format!("[{address}]"),
+    }
 }
 
 fn open_review_url(url: &str) {
@@ -784,6 +950,7 @@ fn build_router(state: WebState) -> Router {
         .route("/review/{uuid}", get(review_page))
         .route("/login", get(login_page))
         .route("/api/login", post(api_login))
+        .route("/api/status", get(api_status))
         .route("/api/tasks", get(api_tasks).post(api_create_task))
         .route("/api/completed-tasks", get(api_completed_tasks))
         .route("/api/archived-tasks", get(api_archived_tasks))
@@ -883,6 +1050,13 @@ struct NewReviewGate {
     artifact_uuid: String,
 }
 
+async fn api_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": "alx",
+        "review_gates": true,
+    }))
+}
+
 async fn api_create_review_gate(
     State(state): State<WebState>,
     Json(input): Json<NewReviewGate>,
@@ -965,7 +1139,7 @@ fn synchronize_sessions(state: &mut SessionState, current_hash: Option<&str>) {
 
 async fn authenticate(State(state): State<WebState>, request: Request, next: Next) -> Response {
     let path = request.uri().path();
-    if path == "/login" || path == "/api/login" {
+    if path == "/login" || path == "/api/login" || path == "/api/status" {
         return next.run(request).await;
     }
     let current_hash = state
@@ -973,29 +1147,37 @@ async fn authenticate(State(state): State<WebState>, request: Request, next: Nex
         .as_ref()
         .and_then(|auth| auth.app.read_password_hash().ok().flatten());
     let configured = current_hash.is_some();
-    let authorized = state.auth.as_ref().is_some_and(|auth| {
-        let mut sessions = auth.sessions.lock().expect("session mutex poisoned");
-        // Password changes happen in a separate CLI process. Compare the current
-        // hash on every request so rotation and clearing revoke old cookies.
-        synchronize_sessions(&mut sessions, current_hash.as_deref());
-        if !configured {
-            return false;
-        }
-        let Some(cookie) = request
+    let cli_authorized = state.auth.is_some()
+        && (path == "/api/review-gates" || path.starts_with("/api/review-gates/"))
+        && request
             .headers()
-            .get(header::COOKIE)
+            .get("x-alx-cli-token")
             .and_then(|value| value.to_str().ok())
-        else {
-            return false;
-        };
-        let Some(token) = cookie.split(';').find_map(|part| {
-            let (name, value) = part.trim().split_once('=')?;
-            (name == "alx_session").then_some(value)
-        }) else {
-            return false;
-        };
-        sessions.tokens.contains(token)
-    });
+            .is_some_and(|token| state.app.cli_token().ok().as_deref() == Some(token));
+    let authorized = cli_authorized
+        || state.auth.as_ref().is_some_and(|auth| {
+            let mut sessions = auth.sessions.lock().expect("session mutex poisoned");
+            // Password changes happen in a separate CLI process. Compare the current
+            // hash on every request so rotation and clearing revoke old cookies.
+            synchronize_sessions(&mut sessions, current_hash.as_deref());
+            if !configured {
+                return false;
+            }
+            let Some(cookie) = request
+                .headers()
+                .get(header::COOKIE)
+                .and_then(|value| value.to_str().ok())
+            else {
+                return false;
+            };
+            let Some(token) = cookie.split(';').find_map(|part| {
+                let (name, value) = part.trim().split_once('=')?;
+                (name == "alx_session").then_some(value)
+            }) else {
+                return false;
+            };
+            sessions.tokens.contains(token)
+        });
     if authorized {
         next.run(request).await
     } else if configured && request.method() == Method::GET && path == "/" {
