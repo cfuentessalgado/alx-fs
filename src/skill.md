@@ -112,7 +112,7 @@ Write a readable file tree for backup, inspection, or leaving `alx`:
 
 ```bash
 alx dump ./export
-alx dump ARE-1175 ./export
+alx dump ISSUE-42 ./export
 ```
 
 The last argument is always the target path; an optional task key before it limits the dump to that task. Without a task key, all active, completed, and archived tasks are dumped. Each task gets `TARGET/<task id>/task.md` and one file per artifact under `TARGET/<task id>/<type>/<artifact name>`. Annotations are not exported. Add `--zip` to write one zip archive at the target path instead of a directory tree:

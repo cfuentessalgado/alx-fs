@@ -1,0 +1,166 @@
+# `alx` reference
+
+This page documents the complete CLI and web UI behavior. See the [README](../README.md) for the product overview and core workflow.
+
+## Install and storage
+
+```bash
+cargo install alx-fs
+```
+
+The database is stored at `~/.local/share/alx/alx.db` on a default Linux setup and `~/Library/Application Support/alx/alx.db` on macOS. Platform directory overrides still apply. Set `ALX_DB=/path/to/alx.db` to use a specific file. Parent directories and the schema are created automatically.
+
+## Agent skill
+
+`alx` includes an agent-compatible skill with its CLI reference and workflows.
+
+```bash
+alx skill read
+alx skill install
+```
+
+`skill read` prints the embedded `SKILL.md`. `skill install` writes the same file to the global `~/.agents/skills/alx/SKILL.md` path and prints that path. These commands do not create or open the `alx` database.
+
+## Tasks
+
+```bash
+alx task create ISSUE-42 <<'EOF'
+Improve search result relevance.
+EOF
+
+alx task read ISSUE-42
+alx task read 019...
+alx task update ISSUE-42 <<'EOF'
+Revised canonical task statement.
+EOF
+alx task rename ISSUE-42 ISSUE-43
+alx task list
+alx task list --json
+alx task complete ISSUE-42
+alx task list --completed
+alx task reopen ISSUE-42
+alx task archive ISSUE-42
+alx task list --archived
+alx task delete ISSUE-42 --confirm
+alx task search relevance
+alx task search relevance --json
+alx task context ISSUE-42
+```
+
+`task create` prints only the new UUID. Task IDs must not conflict with any existing task UUID. `task read` prints only the stored body. UUID inputs accept equivalent UUID text forms, such as uppercase UUIDs. `task update` replaces the stored body from stdin and refreshes `updated_at`. `task rename` changes the task ID while keeping the UUID, body, artifacts, and annotations. Update and rename have no stdout on success. Complete has no stdout and moves an active task to the read-only completed list. Completed and archived tasks cannot be edited, receive artifacts, or change annotations. Use `task list --completed` to list completed tasks and `task reopen` to make one active again. Archive has no stdout and moves an active or completed task to the archived list. Use `task list --archived` to list archived tasks. Delete permanently removes the task, its artifacts, and its annotations. It requires `--confirm` and has no stdout. Plain `task list` and `task search` print one tab-separated record per line with these columns:
+
+```text
+uuid<TAB>id<TAB>updated_at
+```
+
+`task context` prints an aggregate Markdown view. Duplicate artifact types remain separate and each heading includes its artifact UUID. Backslashes, tabs, and line breaks in plain tab-separated text fields are escaped as `\\`, `\\t`, `\\r`, and `\\n`.
+
+## Artifacts
+
+```bash
+alx artifact create ISSUE-42 research \
+  --name search-quality-findings.md < research.md
+alx artifact read "$ARTIFACT_UUID"
+alx artifact update "$ARTIFACT_UUID" < revised.md
+alx artifact rename "$ARTIFACT_UUID" ranking-findings.md
+alx artifact list ISSUE-42
+alx artifact list ISSUE-42 --type research
+alx artifact list ISSUE-42 --json
+alx artifact feedback "$ARTIFACT_UUID"
+alx artifact feedback "$ARTIFACT_UUID" --json
+alx artifact review "$ARTIFACT_UUID"
+alx artifact review "$ARTIFACT_UUID" --interactive
+alx artifact review "$ARTIFACT_UUID" --interactive --no-open
+```
+
+Create prints only the UUID. Read prints only the body. Update and rename have no stdout on success. If `--name` is omitted, create stores a fallback display name such as `research--01a03e73.md`. Plain artifact lists use:
+
+```text
+uuid<TAB>type<TAB>name<TAB>updated_at
+```
+
+Names are presentation metadata. UUIDs remain the canonical identity for reads, updates, renames, annotations, and references. Duplicate names are allowed. Renaming does not change the UUID, type, body, or references. Artifact types are arbitrary non-empty strings and remain independent from names. More than one artifact of the same type is allowed for a task. `artifact feedback` prints raw unresolved annotation data. `artifact review` prints artifact-neutral review instructions followed by the same canonical unresolved feedback formatting. With `--interactive`, the command reuses the configured `alx serve` instance when available, including a Tailscale or explicit bind, and fails if that configured server is unavailable. If no server is configured, it reuses a compatible loopback server or starts a temporary one. It prints a review URL to stderr and waits for **Finish review** in the browser. The browser attempts to close the review tab after finishing. If the browser blocks scripted tab closing, it shows a close-tab message. It then reads and prints the current unresolved feedback. Use `--no-open` to print the URL without opening a browser. Interactive review state is ephemeral; annotations remain durable if the CLI or browser stops.
+
+Agent instructions generated from task context include this guidance:
+
+> When creating an artifact, provide a short descriptive filename with `--name` when there is an obvious one. Use the artifact UUID for all subsequent operations.
+
+## Annotations
+
+Supported kinds are `comment`, `question`, `scratch`, and `good`.
+
+```bash
+alx annotation create "$ARTIFACT_UUID" question \
+  --start-offset 10 --end-offset 28 \
+  --selected-text 'the selected text' <<'EOF'
+Is this assumption valid?
+EOF
+
+alx annotation list "$ARTIFACT_UUID"
+alx annotation list "$ARTIFACT_UUID" --json
+alx annotation list "$ARTIFACT_UUID" --all
+alx annotation resolve "$ANNOTATION_UUID"
+```
+
+Annotation create reads its optional body from stdin and prints only its UUID. Start and end offsets must be supplied together. Web UI offsets are UTF-16 text positions in the rendered artifact, which matches browser string indexing. Plain annotation lists use `\\N` for absent values and these columns:
+
+```text
+uuid<TAB>kind<TAB>start_offset<TAB>end_offset<TAB>resolved_at
+```
+
+Resolved annotations are hidden unless `--all` is used. Resolve has no stdout on success.
+
+## Export
+
+```bash
+alx dump ./export
+alx dump ISSUE-42 ./export
+alx dump --zip ./export.zip
+alx dump ISSUE-42 --zip ./export.zip
+```
+
+`dump` writes a readable file tree for handoff or backup. Each task gets `TARGET/<task id>/task.md` and one file per artifact under `TARGET/<task id>/<artifact type>/<artifact name>`. The last argument is always the target path; an optional task key before it limits the dump to that task. Without a task key, all active, completed, and archived tasks are dumped. Annotations are not exported. Dump has no stdout and does not modify the database. Existing files at the target are overwritten.
+
+Ids and names that are unsafe as path components have unsafe characters replaced with `_`, and duplicate names in the same folder get a `--<UUID prefix>` suffix. `--zip` writes one zip archive at the target path instead of a directory tree.
+
+## Web UI
+
+```bash
+# Foreground operation
+alx serve
+alx serve --bind 192.168.1.10:8080
+alx serve --tailscale
+
+# Passwords are entered through the terminal, never as CLI arguments.
+alx serve password set
+alx serve password clear
+
+# Install and control the native per-user service.
+alx serve install --bind 192.168.1.10:8080
+alx serve install --tailscale
+alx serve status
+alx serve restart
+alx serve uninstall
+```
+
+The default is `127.0.0.1:3000`. `--bind` accepts an explicit `IP:PORT`. Port `0` asks the operating system to select a free port; the listening message shows the selected port. `--tailscale` runs `tailscale ip -4` when the server starts and binds the first valid IPv4 address on port 3000. The options conflict.
+
+`alx serve install` uses a per-user `launchd` agent on macOS and a per-user `systemd` service on Linux. It runs the normal `alx serve` command and enables automatic start at login. No custom daemon process is used. Service files contain only the executable, bind options, and non-secret database path settings. The password hash is stored separately from SQLite with private file permissions.
+
+Loopback serving is unauthenticated. Any non-loopback bind, including `--tailscale`, requires the configured single-user password. If no password is set, the server refuses to start and points to `alx serve password set`. Requests without a valid in-memory session cookie are redirected from `/` to `/login` and cannot access the API. Login establishes an `HttpOnly`, `SameSite=Strict` session cookie. Sessions expire when the server stops. Use a trusted private network and firewall rules. The server rejects non-IP Host headers and cross-origin browser requests to reduce DNS-rebinding and CSRF risk.
+
+The embedded UI shows active tasks under the `alx` root. An interactive review URL opens the selected artifact and shows a **Finish review** action. Existing and newly created unresolved annotations are visible; resolved annotations stay hidden by default. `Completed` and `Archived` are separate root folders. Root, task, and artifact type folders can be expanded and collapsed. Completed tasks are read-only and have **Reopen** and **Archive** actions. The task list has a **New task** action. Active task pages and artifact type folders have a **New artifact** action. Active task pages also have an **Edit task** action that changes the task ID or replaces the stored task body in a Markdown editor. Creation and edit forms accept Markdown bodies, artifact types, and optional artifact filenames. The UI uses artifact names as visible filenames. Task and artifact views have a **Copy** menu. It copies the raw Markdown body, JSON metadata with the matching CLI read command, or only the read command. Task pages include archive and permanent delete actions. Permanent delete requires browser confirmation and removes the task, its artifacts, and its annotations. The UI renders sanitized Markdown, opens feedback actions beside selected text, keeps saved selections highlighted, links each highlight to its feedback card, and resolves annotations. Mermaid fenced code blocks are rendered with Mermaid 11. Diagram viewers support expand, fit-to-view, button-based zoom, and drag-to-pan without an additional zoom library. Code blocks use highlight.js for syntax highlighting. Both libraries and the highlight.js themes are loaded from jsDelivr, so the UI is not fully offline. If the CDN is unreachable, diagram source stays visible and code blocks remain readable without syntax highlighting. Rendered Markdown cannot load images or other remote resources. Editing task IDs or bodies in the browser uses `PUT /api/tasks/{key}`. Updating artifact content in the browser is not part of v1.
+
+## Pipeline behavior
+
+Successful data output goes to stdout. Errors, review URLs, and the `serve` listening address go to stderr. There are no table headers, labels, colors, or decorative status lines on stdout. JSON output is a stable serialized array of the complete stored records.
+
+Examples:
+
+```bash
+alx artifact read "$ARTIFACT_UUID" | glow
+alx artifact feedback "$ARTIFACT_UUID" | pbcopy
+alx artifact review "$ARTIFACT_UUID" | pbcopy
+alx artifact review "$ARTIFACT_UUID" --interactive --no-open | pi
+alx task context ISSUE-42 | nvim -
+```

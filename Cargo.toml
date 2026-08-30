@@ -1,8 +1,8 @@
 [package]
 name = "alx-fs"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2024"
-description = "A persistent task artifact store"
+description = "A local workspace for durable human-agent task state"
 repository = "https://github.com/cfuentessalgado/alx-fs"
 license = "MIT"
 
