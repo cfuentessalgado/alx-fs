@@ -455,6 +455,52 @@ fn task_update_has_no_stdout_and_replaces_body() {
 }
 
 #[test]
+fn task_rename_has_no_stdout_and_keeps_uuid_body_and_artifacts() {
+    let directory = tempfile::tempdir().unwrap();
+    let task_uuid = create_task(&directory);
+    let artifact_uuid = create_artifact(&directory);
+
+    command(&directory)
+        .args(["task", "rename", "ARE-1175", "ARE-1176"])
+        .assert()
+        .success()
+        .stdout("");
+
+    command(&directory)
+        .args(["task", "read", "ARE-1175"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("task not found"));
+    command(&directory)
+        .args(["task", "read", "ARE-1176"])
+        .assert()
+        .success()
+        .stdout("Task body\n");
+    let tasks: Vec<Task> = serde_json::from_str(&stdout(
+        command(&directory).args(["task", "list", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(tasks[0].uuid, task_uuid);
+    assert_eq!(tasks[0].id, "ARE-1176");
+    let artifacts: Vec<Artifact> = serde_json::from_str(&stdout(
+        command(&directory).args(["artifact", "list", "ARE-1176", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(artifacts[0].uuid, artifact_uuid);
+
+    stdout(
+        command(&directory)
+            .args(["task", "create", "ARE-1177"])
+            .write_stdin("other"),
+    );
+    command(&directory)
+        .args(["task", "rename", "ARE-1176", "ARE-1177"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+#[test]
 fn artifact_update_has_no_stdout_and_replaces_body() {
     let directory = tempfile::tempdir().unwrap();
     create_task(&directory);

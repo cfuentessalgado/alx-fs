@@ -37,6 +37,69 @@ fn migrates_and_supports_task_crud_and_lookup() {
 }
 
 #[test]
+fn renames_active_tasks_without_changing_stable_identity_or_content() {
+    let (_directory, app) = test_app();
+    let task = app.create_task("OLD-1", "body").unwrap();
+    let artifact = app.create_artifact(&task.uuid, "notes", "text").unwrap();
+    let annotation = app
+        .create_annotation(
+            &artifact.uuid,
+            NewAnnotation {
+                kind: AnnotationKind::Comment,
+                start_offset: None,
+                end_offset: None,
+                selected_text: None,
+                body: Some("feedback".into()),
+            },
+        )
+        .unwrap();
+
+    app.rename_task("OLD-1", "NEW-1").unwrap();
+
+    assert!(app.read_task("OLD-1").is_err());
+    let renamed = app.read_task("NEW-1").unwrap();
+    assert_eq!(renamed.uuid, task.uuid);
+    assert_eq!(renamed.body, task.body);
+    assert_eq!(
+        app.list_artifacts("NEW-1", None).unwrap()[0].uuid,
+        artifact.uuid
+    );
+    assert_eq!(
+        app.list_annotations(&artifact.uuid, false).unwrap()[0].uuid,
+        annotation.uuid
+    );
+}
+
+#[test]
+fn task_rename_rejects_duplicate_ids_uuid_collisions_and_read_only_tasks() {
+    let (_directory, app) = test_app();
+    let first = app.create_task("FIRST", "one").unwrap();
+    app.create_task("SECOND", "two").unwrap();
+
+    assert!(
+        app.rename_task(&first.uuid, "SECOND")
+            .unwrap_err()
+            .to_string()
+            .contains("already exists")
+    );
+    assert!(
+        app.rename_task(&first.uuid, &first.uuid.to_uppercase())
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts")
+    );
+    assert_eq!(app.read_task(&first.uuid).unwrap().id, "FIRST");
+
+    app.complete_task(&first.uuid).unwrap();
+    assert!(
+        app.rename_task(&first.uuid, "THIRD")
+            .unwrap_err()
+            .to_string()
+            .contains("read-only")
+    );
+}
+
+#[test]
 fn completed_tasks_are_read_only_and_reopenable() {
     let (_directory, app) = test_app();
     let task = app.create_task("COMPLETE-1", "body").unwrap();
@@ -64,6 +127,7 @@ fn completed_tasks_are_read_only_and_reopenable() {
     assert!(completed[0].archived_at.is_none());
 
     assert!(app.update_task(&task.uuid, "changed").is_err());
+    assert!(app.rename_task(&task.uuid, "RENAMED").is_err());
     assert!(app.create_artifact(&task.uuid, "more", "blocked").is_err());
     assert!(app.update_artifact(&artifact.uuid, "changed").is_err());
     assert!(app.rename_artifact(&artifact.uuid, "changed.md").is_err());

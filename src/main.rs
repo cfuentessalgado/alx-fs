@@ -38,6 +38,10 @@ enum TaskCommand {
     Update {
         id_or_uuid: String,
     },
+    Rename {
+        id_or_uuid: String,
+        new_id: String,
+    },
     Search {
         query: String,
         #[arg(long)]
@@ -284,6 +288,7 @@ fn run_task(app: &App, command: TaskCommand) -> Result<()> {
         }
         TaskCommand::Read { id_or_uuid } => print!("{}", app.read_task(&id_or_uuid)?.body),
         TaskCommand::Update { id_or_uuid } => app.update_task(&id_or_uuid, &stdin()?)?,
+        TaskCommand::Rename { id_or_uuid, new_id } => app.rename_task(&id_or_uuid, &new_id)?,
         TaskCommand::Search { query, json } => {
             let tasks = app.search_tasks(&query)?;
             if json {

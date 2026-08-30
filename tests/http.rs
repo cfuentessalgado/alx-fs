@@ -261,8 +261,10 @@ async fn network_user_journey_loads_ui_and_manages_feedback() {
     assert!(!response_body(&root).contains("kind-fieldset"));
     assert!(response_body(&root).contains("task-dialog"));
     assert!(response_body(&root).contains("task-edit-dialog"));
+    assert!(response_body(&root).contains("task-edit-id"));
     assert!(response_body(&root).contains("data-edit-task"));
     assert!(response_body(&root).contains("function submitTaskEdit"));
+    assert!(response_body(&root).contains("id:taskEditIdEl.value.trim()"));
     assert!(response_body(&root).contains("artifact-dialog"));
     assert!(response_body(&root).contains("data-new-task"));
     assert!(response_body(&root).contains("data-new-artifact"));
@@ -644,7 +646,7 @@ async fn http_creates_tasks_and_artifacts() {
 }
 
 #[tokio::test]
-async fn http_updates_task_bodies_and_reports_missing_tasks() {
+async fn http_updates_task_ids_and_bodies_and_reports_missing_tasks() {
     let directory = tempfile::tempdir().unwrap();
     let app = App::new(directory.path().join("alx.db")).unwrap();
     let task = app.create_task("WEB-EDIT", "Old body").unwrap();
@@ -655,7 +657,9 @@ async fn http_updates_task_bodies_and_reports_missing_tasks() {
         .oneshot(
             Request::put(format!("/api/tasks/{}", task.uuid))
                 .header("content-type", "application/json")
-                .body(Body::from(json!({"body": "# Revised body"}).to_string()))
+                .body(Body::from(
+                    json!({"id": "WEB-RENAMED", "body": "# Revised body"}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -663,7 +667,26 @@ async fn http_updates_task_bodies_and_reports_missing_tasks() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     let updated = app.read_task(&task.uuid).unwrap();
     assert_eq!(updated.body, "# Revised body");
-    assert_eq!(updated.id, "WEB-EDIT");
+    assert_eq!(updated.id, "WEB-RENAMED");
+    assert!(app.read_task("WEB-EDIT").is_err());
+
+    app.create_task("WEB-OTHER", "Other body").unwrap();
+    let response = service
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/tasks/{}", task.uuid))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"id": "WEB-OTHER", "body": "must not be saved"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let unchanged = app.read_task(&task.uuid).unwrap();
+    assert_eq!(unchanged.id, "WEB-RENAMED");
+    assert_eq!(unchanged.body, "# Revised body");
 
     let response = service
         .clone()

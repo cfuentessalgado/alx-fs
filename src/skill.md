@@ -31,6 +31,14 @@ alx task update TASK_ID_OR_UUID < REVISED_FILE
 
 Update has no stdout on success. The task UUID and id stay the same.
 
+Rename an active task when its user-facing id must change:
+
+```bash
+alx task rename TASK_ID_OR_UUID NEW_TASK_ID
+```
+
+Rename has no stdout on success. The task UUID, body, artifacts, and annotations stay the same.
+
 Complete a task only when requested. Completed tasks are read-only until reopened:
 
 ```bash

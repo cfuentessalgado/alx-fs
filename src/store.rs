@@ -16,7 +16,7 @@ pub(crate) trait Store: Send + Sync {
     fn list_completed_tasks(&self) -> Result<Vec<Task>>;
     fn list_archived_tasks(&self) -> Result<Vec<Task>>;
     fn search_tasks(&self, query: &str) -> Result<Vec<Task>>;
-    fn update_task(&self, key: &str, body: &str) -> Result<()>;
+    fn edit_task(&self, key: &str, id: Option<&str>, body: Option<&str>) -> Result<()>;
     fn complete_task(&self, key: &str) -> Result<()>;
     fn reopen_task(&self, key: &str) -> Result<()>;
     fn archive_task(&self, key: &str) -> Result<()>;
@@ -196,31 +196,7 @@ impl Store for SqliteStore {
 
     fn read_task(&self, key: &str) -> Result<Task> {
         validate_non_empty("task identifier", key)?;
-        let connection = self.connect()?;
-        let by_id = connection
-            .query_row(
-                "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks WHERE id = ?1",
-                [key],
-                task_from_row,
-            )
-            .optional()?;
-        let by_uuid = match normalized_uuid(key) {
-            Some(uuid) => connection
-                .query_row(
-                    "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks WHERE uuid = ?1",
-                    [uuid],
-                    task_from_row,
-                )
-                .optional()?,
-            None => None,
-        };
-        match (by_id, by_uuid) {
-            (Some(by_id), Some(by_uuid)) if by_id.uuid != by_uuid.uuid => Err(invalid(format!(
-                "ambiguous task identifier matches an id and a UUID: {key}"
-            ))),
-            (Some(task), _) | (None, Some(task)) => Ok(task),
-            (None, None) => Err(not_found(format!("task not found: {key}"))),
-        }
+        read_task_from_connection(&self.connect()?, key)
     }
 
     fn list_tasks(&self) -> Result<Vec<Task>> {
@@ -248,18 +224,55 @@ impl Store for SqliteStore {
         collect_rows(rows)
     }
 
-    fn update_task(&self, key: &str, body: &str) -> Result<()> {
-        let task = self.read_task(key)?;
-        ensure_task_writable(&task)?;
-        let changed = self.connect()?.execute(
-            "UPDATE tasks SET body = ?2, updated_at = ?3
-             WHERE uuid = ?1 AND archived_at IS NULL AND completed_at IS NULL",
-            params![task.uuid, body, now()],
-        )?;
-        if changed == 0 {
-            ensure_task_writable(&self.read_task(&task.uuid)?)?;
-            return Err(not_found(format!("task not found: {key}")));
+    fn edit_task(&self, key: &str, id: Option<&str>, body: Option<&str>) -> Result<()> {
+        validate_non_empty("task identifier", key)?;
+        if let Some(id) = id {
+            validate_non_empty("task id", id)?;
         }
+        if id.is_none() && body.is_none() {
+            return Err(invalid("task edit requires an id or body"));
+        }
+
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = read_task_from_connection(&transaction, key)?;
+        ensure_task_writable(&task)?;
+        let id = id.unwrap_or(&task.id);
+        let body = body.unwrap_or(&task.body);
+
+        if id != task.id {
+            let duplicate = transaction
+                .query_row(
+                    "SELECT 1 FROM tasks WHERE id = ?1 AND uuid != ?2",
+                    params![id, task.uuid],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            if duplicate.is_some() {
+                return Err(invalid(format!("task id already exists: {id}")));
+            }
+            if let Some(normalized_id) = normalized_uuid(id) {
+                let collision = transaction
+                    .query_row(
+                        "SELECT 1 FROM tasks WHERE uuid = ?1",
+                        [normalized_id],
+                        |_| Ok(()),
+                    )
+                    .optional()?;
+                if collision.is_some() {
+                    return Err(invalid(format!(
+                        "task id conflicts with an existing task UUID: {id}"
+                    )));
+                }
+            }
+        }
+
+        transaction.execute(
+            "UPDATE tasks SET id = ?2, body = ?3, updated_at = ?4
+             WHERE uuid = ?1 AND archived_at IS NULL AND completed_at IS NULL",
+            params![task.uuid, id, body, now()],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -592,6 +605,33 @@ impl SqliteStore {
         let mut statement = connection.prepare(&sql)?;
         let rows = statement.query_map([], task_from_row)?;
         collect_rows(rows)
+    }
+}
+
+fn read_task_from_connection(connection: &Connection, key: &str) -> Result<Task> {
+    let by_id = connection
+        .query_row(
+            "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks WHERE id = ?1",
+            [key],
+            task_from_row,
+        )
+        .optional()?;
+    let by_uuid = match normalized_uuid(key) {
+        Some(uuid) => connection
+            .query_row(
+                "SELECT uuid, id, body, created_at, updated_at, archived_at, completed_at FROM tasks WHERE uuid = ?1",
+                [uuid],
+                task_from_row,
+            )
+            .optional()?,
+        None => None,
+    };
+    match (by_id, by_uuid) {
+        (Some(by_id), Some(by_uuid)) if by_id.uuid != by_uuid.uuid => Err(invalid(format!(
+            "ambiguous task identifier matches an id and a UUID: {key}"
+        ))),
+        (Some(task), _) | (None, Some(task)) => Ok(task),
+        (None, None) => Err(not_found(format!("task not found: {key}"))),
     }
 }
 

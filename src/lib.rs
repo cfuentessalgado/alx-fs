@@ -346,7 +346,15 @@ impl App {
     }
 
     pub fn update_task(&self, key: &str, body: &str) -> Result<()> {
-        self.store.update_task(key, body)
+        self.store.edit_task(key, None, Some(body))
+    }
+
+    pub fn rename_task(&self, key: &str, id: &str) -> Result<()> {
+        self.store.edit_task(key, Some(id), None)
+    }
+
+    pub fn edit_task(&self, key: &str, id: Option<&str>, body: Option<&str>) -> Result<()> {
+        self.store.edit_task(key, id, body)
     }
 
     pub fn complete_task(&self, key: &str) -> Result<()> {
@@ -1294,7 +1302,8 @@ struct DeleteConfirmation {
 
 #[derive(Debug, Deserialize)]
 struct TaskUpdateInput {
-    body: String,
+    id: Option<String>,
+    body: Option<String>,
 }
 
 async fn api_update_task(
@@ -1302,7 +1311,7 @@ async fn api_update_task(
     AxumPath(key): AxumPath<String>,
     Json(input): Json<TaskUpdateInput>,
 ) -> ApiResult<StatusCode> {
-    app.update_task(&key, &input.body)?;
+    app.edit_task(&key, input.id.as_deref(), input.body.as_deref())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1644,7 +1653,7 @@ mod store_tests {
             unreachable!()
         }
 
-        fn update_task(&self, _key: &str, _body: &str) -> Result<()> {
+        fn edit_task(&self, _key: &str, _id: Option<&str>, _body: Option<&str>) -> Result<()> {
             unreachable!()
         }
 
