@@ -66,6 +66,16 @@ alx task context ISSUE-42
 The context includes each artifact UUID, which the agent can use to read its
 unresolved review feedback.
 
+Search across task bodies, artifacts, and annotation text with regular
+expressions:
+
+```bash
+alx grep 'latency|relevance'
+```
+
+Artifact matches include the artifact UUID, which can be inspected directly
+with `alx artifact info ARTIFACT_UUID`.
+
 ## A clear boundary around code
 
 Use Git for code and versioned project documents. Use `alx` for the live state
@@ -120,8 +130,9 @@ alx serve
 ## Built for CLI workflows
 
 Successful data goes to stdout. Errors, review URLs, and server status go to
-stderr. Plain output has no table headers, colors, or decorative status text.
-Commands that list records also support JSON where structured output is useful.
+stderr. Interactive `grep` output uses colors and grouped paths; piped output is
+stable and uncolored. Commands intended for scripting support JSON where
+structured output is useful.
 
 This makes commands easy to compose with shells, editors, and agents:
 

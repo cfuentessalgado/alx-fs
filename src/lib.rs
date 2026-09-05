@@ -40,7 +40,9 @@ mod model;
 mod store;
 
 use error::{DomainError, DomainErrorKind, invalid};
-pub use model::{Annotation, AnnotationKind, Artifact, NewAnnotation, Task};
+pub use model::{
+    Annotation, AnnotationKind, Artifact, ArtifactInfo, GrepMatch, NewAnnotation, Task,
+};
 use store::{SqliteStore, Store};
 
 #[derive(Clone)]
@@ -345,6 +347,84 @@ impl App {
         self.store.search_tasks(query)
     }
 
+    pub fn grep(&self, pattern: &str) -> Result<Vec<GrepMatch>> {
+        use grep_regex::RegexMatcher;
+        use grep_searcher::{SearcherBuilder, sinks::UTF8};
+
+        let matcher = RegexMatcher::new(pattern)?;
+        let mut matches = Vec::new();
+        for document in self.store.search_documents()? {
+            let path = document.path.clone();
+            let artifact_uuid = document.artifact_uuid.clone();
+            SearcherBuilder::new()
+                .line_number(true)
+                .build()
+                .search_slice(
+                    &matcher,
+                    document.body.as_bytes(),
+                    UTF8(|line_number, line| {
+                        matches.push(GrepMatch {
+                            path: path.clone(),
+                            artifact_uuid: artifact_uuid.clone(),
+                            line_number,
+                            line: line.trim_end_matches(['\r', '\n']).to_owned(),
+                        });
+                        Ok(true)
+                    }),
+                )?;
+        }
+        Ok(matches)
+    }
+
+    pub fn grep_print(&self, pattern: &str, writer: impl Write) -> Result<()> {
+        use grep_printer::StandardBuilder;
+        use grep_regex::RegexMatcher;
+        use grep_searcher::SearcherBuilder;
+
+        let matcher = RegexMatcher::new(pattern)?;
+        let mut printer = StandardBuilder::new().build_no_color(writer);
+        for document in self.store.search_documents()? {
+            let display_path = document.display_path();
+            SearcherBuilder::new()
+                .line_number(true)
+                .build()
+                .search_slice(
+                    &matcher,
+                    document.body.as_bytes(),
+                    printer.sink_with_path(&matcher, &display_path),
+                )?;
+        }
+        Ok(())
+    }
+
+    pub fn grep_print_terminal(
+        &self,
+        pattern: &str,
+        writer: impl termcolor::WriteColor,
+    ) -> Result<()> {
+        use grep_printer::{ColorSpecs, StandardBuilder};
+        use grep_regex::RegexMatcher;
+        use grep_searcher::SearcherBuilder;
+
+        let matcher = RegexMatcher::new(pattern)?;
+        let mut printer = StandardBuilder::new()
+            .heading(true)
+            .color_specs(ColorSpecs::default_with_color())
+            .build(writer);
+        for document in self.store.search_documents()? {
+            let display_path = document.display_path();
+            SearcherBuilder::new()
+                .line_number(true)
+                .build()
+                .search_slice(
+                    &matcher,
+                    document.body.as_bytes(),
+                    printer.sink_with_path(&matcher, &display_path),
+                )?;
+        }
+        Ok(())
+    }
+
     pub fn update_task(&self, key: &str, body: &str) -> Result<()> {
         self.store.edit_task(key, None, Some(body))
     }
@@ -395,6 +475,21 @@ impl App {
 
     pub fn read_artifact(&self, uuid: &str) -> Result<Artifact> {
         self.store.read_artifact(uuid)
+    }
+
+    pub fn artifact_info(&self, uuid: &str) -> Result<ArtifactInfo> {
+        let artifact = self.store.read_artifact(uuid)?;
+        let task = self.store.read_task(&artifact.task_uuid)?;
+        let name = artifact.display_name();
+        Ok(ArtifactInfo {
+            uuid: artifact.uuid,
+            task_uuid: artifact.task_uuid,
+            task_id: task.id,
+            artifact_type: artifact.artifact_type,
+            name,
+            created_at: artifact.created_at,
+            updated_at: artifact.updated_at,
+        })
     }
 
     pub fn update_artifact(&self, uuid: &str, body: &str) -> Result<()> {
@@ -1650,6 +1745,10 @@ mod store_tests {
         }
 
         fn search_tasks(&self, _query: &str) -> Result<Vec<Task>> {
+            unreachable!()
+        }
+
+        fn search_documents(&self) -> Result<Vec<model::SearchDocument>> {
             unreachable!()
         }
 

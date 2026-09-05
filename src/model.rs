@@ -27,6 +27,42 @@ pub struct Artifact {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactInfo {
+    pub uuid: String,
+    pub task_uuid: String,
+    pub task_id: String,
+    #[serde(rename = "type")]
+    pub artifact_type: String,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SearchDocument {
+    pub path: String,
+    pub artifact_uuid: Option<String>,
+    pub body: String,
+}
+
+impl SearchDocument {
+    pub fn display_path(&self) -> String {
+        match &self.artifact_uuid {
+            Some(uuid) => format!("{} [{uuid}]", self.path),
+            None => self.path.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrepMatch {
+    pub path: String,
+    pub artifact_uuid: Option<String>,
+    pub line_number: u64,
+    pub line: String,
+}
+
 impl Artifact {
     pub fn display_name(&self) -> String {
         self.name

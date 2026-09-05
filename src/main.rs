@@ -13,6 +13,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Grep {
+        pattern: String,
+        #[arg(long)]
+        json: bool,
+    },
     Task(TaskArgs),
     Artifact(ArtifactArgs),
     Annotation(AnnotationArgs),
@@ -90,6 +95,11 @@ enum ArtifactCommand {
     },
     Read {
         uuid: String,
+    },
+    Info {
+        uuid: String,
+        #[arg(long)]
+        json: bool,
     },
     Update {
         uuid: String,
@@ -212,6 +222,20 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Grep { pattern, json } => {
+            let app = App::from_env()?;
+            if json {
+                let matches = app.grep(&pattern)?;
+                println!("{}", serde_json::to_string_pretty(&matches)?);
+            } else if io::stdout().is_terminal() {
+                app.grep_print_terminal(
+                    &pattern,
+                    termcolor::StandardStream::stdout(termcolor::ColorChoice::Auto),
+                )?;
+            } else {
+                app.grep_print(&pattern, io::stdout().lock())?;
+            }
+        }
         Command::Task(args) => run_task(&App::from_env()?, args.command)?,
         Command::Artifact(args) => run_artifact(&App::from_env()?, args.command).await?,
         Command::Annotation(args) => run_annotation(&App::from_env()?, args.command)?,
@@ -366,6 +390,23 @@ async fn run_artifact(app: &App, command: ArtifactCommand) -> Result<()> {
             );
         }
         ArtifactCommand::Read { uuid } => print!("{}", app.read_artifact(&uuid)?.body),
+        ArtifactCommand::Info { uuid, json } => {
+            let info = app.artifact_info(&uuid)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                println!(
+                    "Artifact UUID: {}\nTask ID:      {}\nTask UUID:    {}\nType:         {}\nName:         {}\nCreated:      {}\nUpdated:      {}",
+                    info.uuid,
+                    info.task_id,
+                    info.task_uuid,
+                    info.artifact_type,
+                    info.name,
+                    info.created_at,
+                    info.updated_at,
+                );
+            }
+        }
         ArtifactCommand::Update { uuid } => app.update_artifact(&uuid, &stdin()?)?,
         ArtifactCommand::Rename { uuid, name } => app.rename_artifact(&uuid, &name)?,
         ArtifactCommand::List {

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use alx::{AGENT_SKILL, Annotation, Artifact, Task};
+use alx::{AGENT_SKILL, Annotation, Artifact, ArtifactInfo, GrepMatch, Task};
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -39,6 +39,74 @@ fn create_artifact(directory: &TempDir) -> String {
     )
     .trim()
     .to_owned()
+}
+
+#[test]
+fn artifact_info_resolves_its_owning_task() {
+    let directory = tempfile::tempdir().unwrap();
+    let task_uuid = create_task(&directory);
+    let artifact_uuid = create_artifact(&directory);
+
+    let info: ArtifactInfo = serde_json::from_str(&stdout(command(&directory).args([
+        "artifact",
+        "info",
+        &artifact_uuid,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(info.uuid, artifact_uuid);
+    assert_eq!(info.task_uuid, task_uuid);
+    assert_eq!(info.task_id, "ARE-1175");
+    assert_eq!(info.artifact_type, "research");
+
+    let plain = stdout(command(&directory).args(["artifact", "info", &artifact_uuid]));
+    assert!(plain.contains(&format!("Artifact UUID: {artifact_uuid}\n")));
+    assert!(plain.contains("Task ID:      ARE-1175\n"));
+    assert!(plain.contains(&format!("Task UUID:    {task_uuid}\n")));
+    assert!(plain.contains("Type:         research\n"));
+    assert!(plain.contains(&format!(
+        "Name:         research--{}.md\n",
+        &artifact_uuid[..8]
+    )));
+}
+
+#[test]
+fn grep_searches_tasks_artifacts_and_annotations_with_locations() {
+    let directory = tempfile::tempdir().unwrap();
+    create_task(&directory);
+    let artifact_uuid = create_artifact(&directory);
+    let annotation_uuid = stdout(
+        command(&directory)
+            .args(["annotation", "create", &artifact_uuid, "comment"])
+            .write_stdin("Old feedback\n"),
+    )
+    .trim()
+    .to_owned();
+
+    let output = stdout(command(&directory).args(["grep", "body|Old"]));
+    assert!(output.contains("ARE-1175/task.md:1:Task body\n"));
+    assert!(output.contains(&format!(
+        "ARE-1175/research/research--{}.md [{artifact_uuid}]:3:Old\n",
+        &artifact_uuid[..8],
+    )));
+    assert!(output.contains(&format!(
+        "ARE-1175/research/research--{}.md/annotations/{annotation_uuid}.md [{artifact_uuid}]:1:Old feedback\n",
+        &artifact_uuid[..8],
+    )));
+
+    let matches: Vec<GrepMatch> = serde_json::from_str(&stdout(command(&directory).args([
+        "grep",
+        "^# Findings$",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0].artifact_uuid.as_deref(),
+        Some(artifact_uuid.as_str())
+    );
+    assert_eq!(matches[0].line_number, 1);
+    assert_eq!(matches[0].line, "# Findings");
 }
 
 #[test]

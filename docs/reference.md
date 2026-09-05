@@ -55,12 +55,32 @@ uuid<TAB>id<TAB>updated_at
 
 `task context` prints an aggregate Markdown view. Duplicate artifact types remain separate and each heading includes its artifact UUID. Backslashes, tabs, and line breaks in plain tab-separated text fields are escaped as `\\`, `\\t`, `\\r`, and `\\n`.
 
+## Search
+
+```bash
+alx grep 'relevance|latency'
+alx grep '^# Findings$' --json
+```
+
+`grep` searches task bodies, artifact bodies, and annotation bodies across active, completed, and archived tasks using regular expressions. Interactive output uses ripgrep-style colors and groups matching lines beneath virtual paths. Artifact and annotation paths include the owning artifact UUID in brackets so it can be copied into other artifact commands. Task-body paths do not include a redundant UUID because the task ID in the path is already accepted by task commands.
+
+When stdout is redirected, output is uncolored and uses one match per line:
+
+```text
+TASK-ID/task.md:line:text
+TASK-ID/type/name.md [ARTIFACT_UUID]:line:text
+```
+
+`--json` returns structured matches with `path`, nullable `artifact_uuid`, `line_number`, and `line` fields.
+
 ## Artifacts
 
 ```bash
 alx artifact create ISSUE-42 research \
   --name search-quality-findings.md < research.md
 alx artifact read "$ARTIFACT_UUID"
+alx artifact info "$ARTIFACT_UUID"
+alx artifact info "$ARTIFACT_UUID" --json
 alx artifact update "$ARTIFACT_UUID" < revised.md
 alx artifact rename "$ARTIFACT_UUID" ranking-findings.md
 alx artifact list ISSUE-42
@@ -73,7 +93,7 @@ alx artifact review "$ARTIFACT_UUID" --interactive
 alx artifact review "$ARTIFACT_UUID" --interactive --no-open
 ```
 
-Create prints only the UUID. Read prints only the body. Update and rename have no stdout on success. If `--name` is omitted, create stores a fallback display name such as `research--01a03e73.md`. Plain artifact lists use:
+Create prints only the UUID. Read prints only the body. `artifact info` prints labeled metadata for one artifact, including its owning task ID and task UUID; use `--json` for structured output. Update and rename have no stdout on success. If `--name` is omitted, create stores a fallback display name such as `research--01a03e73.md`. Plain artifact lists use:
 
 ```text
 uuid<TAB>type<TAB>name<TAB>updated_at

@@ -21,7 +21,16 @@ Create a task only when requested:
 printf '%s\n' 'Task instructions' | alx task create TASK_ID
 ```
 
-Task creation prints the task UUID. Use `alx task context` as the preferred broad read. Use `alx task read TASK_ID_OR_UUID` as the narrow source of truth for the task body. Use `alx task list` and `alx task search QUERY` to find tasks. Add `--json` to list and search commands when structured output is useful.
+Task creation prints the task UUID. Use `alx task context` as the preferred broad read. Use `alx task read TASK_ID_OR_UUID` as the narrow source of truth for the task body. Use `alx task list` and `alx task search QUERY` to find tasks.
+
+Search task bodies, artifacts, and annotation bodies across the workspace with a regular expression:
+
+```bash
+alx grep 'PATTERN'
+alx grep 'PATTERN' --json
+```
+
+Artifact matches include the owning artifact UUID. Interactive output is colored and grouped; redirected output is stable and uncolored. Use `--json` when structured match fields are useful.
 
 Update a task body only when the task instructions change:
 
@@ -72,13 +81,15 @@ When creating an artifact, provide a short descriptive filename with `--name` wh
 
 ```bash
 alx artifact read ARTIFACT_UUID
+alx artifact info ARTIFACT_UUID
+alx artifact info ARTIFACT_UUID --json
 alx artifact update ARTIFACT_UUID < REVISED_FILE
 alx artifact rename ARTIFACT_UUID new-name.md
 alx artifact list TASK_ID_OR_UUID
 alx artifact list TASK_ID_OR_UUID --type TYPE --json
 ```
 
-Artifact types are arbitrary non-empty strings. Multiple artifacts can have the same type or name. The UUID is the canonical identity.
+`artifact info` returns metadata about one artifact, including its owning task ID and task UUID. Artifact types are arbitrary non-empty strings. Multiple artifacts can have the same type or name. The UUID is the canonical identity.
 
 ## Process feedback
 

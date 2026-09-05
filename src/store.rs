@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::error::{invalid, not_found};
-use crate::model::artifact_fallback_name;
+use crate::model::{SearchDocument, artifact_fallback_name};
 use crate::{Annotation, AnnotationKind, Artifact, NewAnnotation, Task, new_uuid, now};
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -16,6 +16,7 @@ pub(crate) trait Store: Send + Sync {
     fn list_completed_tasks(&self) -> Result<Vec<Task>>;
     fn list_archived_tasks(&self) -> Result<Vec<Task>>;
     fn search_tasks(&self, query: &str) -> Result<Vec<Task>>;
+    fn search_documents(&self) -> Result<Vec<SearchDocument>>;
     fn edit_task(&self, key: &str, id: Option<&str>, body: Option<&str>) -> Result<()>;
     fn complete_task(&self, key: &str) -> Result<()>;
     fn reopen_task(&self, key: &str) -> Result<()>;
@@ -222,6 +223,78 @@ impl Store for SqliteStore {
         )?;
         let rows = statement.query_map([pattern], task_from_row)?;
         collect_rows(rows)
+    }
+
+    fn search_documents(&self) -> Result<Vec<SearchDocument>> {
+        let connection = self.connect()?;
+        let mut documents = Vec::new();
+
+        {
+            let mut statement = connection.prepare("SELECT id, body FROM tasks ORDER BY id")?;
+            let rows = statement.query_map([], |row| {
+                Ok(SearchDocument {
+                    path: format!("{}/task.md", row.get::<_, String>(0)?),
+                    artifact_uuid: None,
+                    body: row.get(1)?,
+                })
+            })?;
+            documents.extend(collect_rows(rows)?);
+        }
+        {
+            let mut statement = connection.prepare(
+                "SELECT tasks.id, artifacts.type, artifacts.name, artifacts.uuid, artifacts.body
+                 FROM artifacts JOIN tasks ON tasks.uuid = artifacts.task_uuid
+                 ORDER BY tasks.id, artifacts.created_at, artifacts.uuid",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let artifact_type: String = row.get(1)?;
+                let uuid: String = row.get(3)?;
+                let name: Option<String> = row.get(2)?;
+                Ok(SearchDocument {
+                    path: format!(
+                        "{}/{}/{}",
+                        row.get::<_, String>(0)?,
+                        artifact_type,
+                        name.unwrap_or_else(|| artifact_fallback_name(&artifact_type, &uuid))
+                    ),
+                    artifact_uuid: Some(uuid),
+                    body: row.get(4)?,
+                })
+            })?;
+            documents.extend(collect_rows(rows)?);
+        }
+        {
+            let mut statement = connection.prepare(
+                "SELECT tasks.id, artifacts.type, artifacts.name, artifacts.uuid,
+                        annotations.uuid, annotations.body
+                 FROM annotations
+                 JOIN artifacts ON artifacts.uuid = annotations.artifact_uuid
+                 JOIN tasks ON tasks.uuid = artifacts.task_uuid
+                 WHERE annotations.body IS NOT NULL
+                 ORDER BY tasks.id, artifacts.created_at, annotations.created_at, annotations.uuid",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let artifact_type: String = row.get(1)?;
+                let artifact_uuid: String = row.get(3)?;
+                let name: Option<String> = row.get(2)?;
+                Ok(SearchDocument {
+                    path: format!(
+                        "{}/{}/{}/annotations/{}.md",
+                        row.get::<_, String>(0)?,
+                        artifact_type,
+                        name.unwrap_or_else(|| artifact_fallback_name(
+                            &artifact_type,
+                            &artifact_uuid
+                        )),
+                        row.get::<_, String>(4)?
+                    ),
+                    artifact_uuid: Some(artifact_uuid),
+                    body: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                })
+            })?;
+            documents.extend(collect_rows(rows)?);
+        }
+        Ok(documents)
     }
 
     fn edit_task(&self, key: &str, id: Option<&str>, body: Option<&str>) -> Result<()> {
